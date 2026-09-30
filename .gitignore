@@ -1,0 +1,6 @@
+models/
+.build/
+*.app
+.DS_Store
+HANDOFF.md
+docs/superpowers/
