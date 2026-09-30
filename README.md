@@ -14,7 +14,7 @@ Live transcript of every call, speakers told apart, and clean notes when the cal
 ![On-device](https://img.shields.io/badge/speech-on--device-2ea44f)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-<img src="assets/demo.gif" width="800" alt="Waffle recording a standup: the live transcript fills in as people speak, then the summary, a folder with its stats, and a weekly report">
+<img src="assets/demo.gif" width="900" alt="Waffle recording a standup: the live transcript fills in as people speak, then the summary, a folder with its stats, and a weekly report">
 
 </div>
 
