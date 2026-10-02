@@ -127,6 +127,9 @@ struct Sidebar: View {
                     .overlay(RightClick {
                         let menu = NSMenu()
                         menu.addItem(ActionItem("New Subfolder...") { model.newFolderParent = f.name; creating = true })
+                        menu.addItem(ActionItem("Folder Settings...") { model.scope = .folder(f.name); model.selected = nil; model.folderSettings = f.name })
+                        menu.addItem(.separator())
+                        menu.addItem(ActionItem("Delete Folder...") { [model] in model.deleteFolder(f.name) })
                         return menu
                     })
                 }
@@ -791,6 +794,12 @@ struct FolderSettings: View {
             }
             .formStyle(.grouped)
             HStack {
+                Button(role: .destructive) {
+                    let f = folder
+                    dismiss()
+                    DispatchQueue.main.async { model.deleteFolder(f) }  // the alert after the sheet is gone
+                } label: { Label("Delete Folder...", systemImage: "trash") }
+                .foregroundStyle(.red).help("Delete this folder; its meetings stay")
                 Button("Manage Templates...") { dismiss(); model.settingsOpen = true }.help("Add or change templates in Settings")
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
