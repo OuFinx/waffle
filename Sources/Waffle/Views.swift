@@ -1223,11 +1223,15 @@ struct TranscriptView: View {
     var delete: (Line) -> Void = { _ in }
     var rename: (_ spk: String, _ name: String) -> Void = { _, _ in }
 
-    /// Runs of lines from the same source and voice, with the index of their first line as a stable id.
-    var turns: [(id: Int, lines: [Line])] {
-        var out: [(id: Int, lines: [Line])] = []
+    /// One row per line, with the speaker's name and time over the first line of each run from the same source and voice. Rows, not
+    /// runs, so the list stays lazy: a long monologue as one run was one huge row, built in full and slow to open.
+    var rows: [(id: Int, line: Line, name: String, first: Bool)] {
+        var out: [(id: Int, line: Line, name: String, first: Bool)] = []
+        out.reserveCapacity(lines.count)
         for (i, l) in lines.enumerated() {
-            if let last = out.last?.lines.last, last.src == l.src, label(last, names) == label(l, names) { out[out.count - 1].lines.append(l) } else { out.append((i, [l])) }
+            let name = label(l, names)
+            let first = out.last.map { $0.line.src != l.src || $0.name != name } ?? true
+            out.append((i, l, name, first))
         }
         return out
     }
@@ -1238,8 +1242,14 @@ struct TranscriptView: View {
 
     var chat: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 12) {
-                ForEach(turns, id: \.id) { t in TurnView(lines: t.lines, name: label(t.lines[0], names), delete: delete, rename: rename) }
+            LazyVStack(alignment: .leading, spacing: 3) {
+                ForEach(rows, id: \.id) { r in
+                    VStack(alignment: r.line.src == "mic" ? .trailing : .leading, spacing: 3) {
+                        if r.first { TurnHeader(line: r.line, name: r.name, rename: rename).padding(.top, r.id == 0 ? 0 : 9) }
+                        LineBubble(line: r.line, me: r.line.src == "mic", delete: delete)
+                    }
+                    .frame(maxWidth: .infinity, alignment: r.line.src == "mic" ? .trailing : .leading)
+                }
                 ForEach(["sys", "mic"].filter(typing.contains), id: \.self) { src in
                     HStack {
                         if src == "mic" { Spacer() }
@@ -1260,35 +1270,28 @@ struct TranscriptView: View {
 let meBubble = Color(light: .init(srgbRed: 0.04, green: 0.38, blue: 0.82, alpha: 1), dark: .init(srgbRed: 0.04, green: 0.38, blue: 0.82, alpha: 1))
 let themBubble = Color(light: .init(srgbRed: 0.898, green: 0.898, blue: 0.918, alpha: 1), dark: .init(srgbRed: 0.227, green: 0.227, blue: 0.235, alpha: 1))
 
-/// One voice's run of lines: name and time, then a bubble per line.
-struct TurnView: View {
-    let lines: [Line]
+/// Over the first line of a voice's run: name and time.
+struct TurnHeader: View {
+    let line: Line
     let name: String
-    let delete: (Line) -> Void
     var rename: (_ spk: String, _ name: String) -> Void = { _, _ in }
     @State var renaming = false
 
-    var me: Bool { lines[0].src == "mic" }
-
     var body: some View {
-        VStack(alignment: me ? .trailing : .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                if !me {
-                    if let spk = lines[0].spk, lines[0].src == "sys" {  // a told-apart voice: click to name it
-                        Button { renaming = true } label: { Text(name).fontWeight(.semibold).foregroundStyle(themColor) }
-                            .buttonStyle(.plain).help("Name this voice")
-                            .popover(isPresented: $renaming) { RenameSpeaker(current: name) { rename(spk, $0) } }
-                    } else {
-                        Text(name).fontWeight(.semibold).foregroundStyle(themColor)
-                    }
+        HStack(spacing: 6) {
+            if line.src != "mic" {
+                if let spk = line.spk, line.src == "sys" {  // a told-apart voice: click to name it
+                    Button { renaming = true } label: { Text(name).fontWeight(.semibold).foregroundStyle(themColor) }
+                        .buttonStyle(.plain).help("Name this voice")
+                        .popover(isPresented: $renaming) { RenameSpeaker(current: name) { rename(spk, $0) } }
+                } else {
+                    Text(name).fontWeight(.semibold).foregroundStyle(themColor)
                 }
-                Text(String(clock(lines[0].t).prefix(5))).foregroundStyle(.secondary).monospacedDigit()
             }
-            .font(.system(size: 11))
-            .padding(.horizontal, 12)
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, l in LineBubble(line: l, me: me, delete: delete) }
+            Text(String(clock(line.t).prefix(5))).foregroundStyle(.secondary).monospacedDigit()
         }
-        .frame(maxWidth: .infinity, alignment: me ? .trailing : .leading)
+        .font(.system(size: 11))
+        .padding(.horizontal, 12)
     }
 }
 
