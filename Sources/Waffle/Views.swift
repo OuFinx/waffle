@@ -939,6 +939,9 @@ struct MeetingView: View {
                         Button(copied ? "Copied" : "Copy") { copy(summary) }.help("Copy as rich text, ready for Slack or email")
                     }
                 }
+                if tab == .transcript && !lines.isEmpty {
+                    Button(copied ? "Copied" : "Copy") { copyTranscript() }.help("Copy the transcript as \u{201C}Who: what they said\u{201D}, one line per turn")
+                }
             }
             .padding(.top, 4)
             Divider()
@@ -994,6 +997,13 @@ struct MeetingView: View {
 
     func copy(_ text: String) {
         copyRich(text)
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+    }
+
+    func copyTranscript() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(transcriptCopy(lines, names: speakerMeta), forType: .string)
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
     }

@@ -180,6 +180,17 @@ func transcriptText(_ lines: [Line], names: [String: String] = [:]) -> String {
     return lines.map { "[\(clock($0.t))] \(label($0, n)): \($0.text)" }.joined(separator: "\n")
 }
 
+/// The transcript to paste anywhere: "Who: what they said", one line per turn (a run of lines from one speaker is one turn).
+func transcriptCopy(_ lines: [Line], names: [String: String] = [:]) -> String {
+    let n = speakerNames(lines, names: names)
+    var turns: [(who: String, text: String)] = []
+    for l in lines {
+        let who = label(l, n)
+        if turns.last?.who == who { turns[turns.count - 1].text += " " + l.text } else { turns.append((who, l.text)) }
+    }
+    return turns.map { "\($0.who): \($0.text)" }.joined(separator: "\n")
+}
+
 /// "12:34", or "1:02:03" past an hour.
 func elapsed(_ secs: Int) -> String {
     let s = max(0, secs)

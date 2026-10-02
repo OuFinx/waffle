@@ -62,6 +62,9 @@ let names = speakerNames(labelled, names: ["1-2": "Oleg"])
 assert(names == ["1-1": "Speaker 1", "1-2": "Oleg"] && labelled.map { label($0, names) } == ["Speaker 1", "Me", "Oleg", "Them"])
 assert(speakerNames(Array(labelled.prefix(2)), names: [:]) == ["1-1": "Them"])  // one voice only: plain "Them"
 assert(transcriptText(Array(labelled.prefix(3)), names: ["1-2": "Oleg"]).hasSuffix("Oleg: Status?"))
+// copy: "Who: what they said", a speaker's run of lines joined into one line
+assert(transcriptCopy(labelled, names: ["1-2": "Oleg"]) == "Speaker 1: Hi.\nMe: Hello.\nOleg: Status?\nThem: Later.", transcriptCopy(labelled, names: ["1-2": "Oleg"]))
+assert(transcriptCopy([line(0, "mic", "One."), line(1, "mic", "Two."), line(2, "sys", "Three.")]) == "Me: One. Two.\nThem: Three." && transcriptCopy([]) == "")
 // old transcripts without "spk" still load
 assert(try! JSONDecoder().decode(Line.self, from: Data(#"{"t":1,"src":"sys","text":"x","part":1,"final":true}"#.utf8)).spk == nil)
 
