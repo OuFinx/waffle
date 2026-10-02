@@ -440,9 +440,7 @@ struct CallPrompt: View {
                     Text("\(apps.joined(separator: ", ")) is using the microphone.").font(.subheadline).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 4)
-                Button(action: dismiss) { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).padding(5).contentShape(Circle()) }
-                    .buttonStyle(.borderless).foregroundStyle(.secondary).help("Not now: ask again when a new call starts")
+                Spacer(minLength: 0)
             }
             HStack(spacing: 8) {
                 Button(action: record) {
@@ -462,6 +460,18 @@ struct CallPrompt: View {
         .background { if scheme == .light { paper } else { VisualEffect() } }
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.primary.opacity(0.08)))
+        // Close at the top left, like a macOS notification.
+        .overlay(alignment: .topLeading) {
+            Button(action: dismiss) {
+                Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Color.primary.opacity(0.7))
+                    .frame(width: 20, height: 20)
+                    .background(.regularMaterial, in: Circle())
+                    .overlay(Circle().stroke(Color.primary.opacity(0.15)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain).padding(6)
+            .help("Close: ask again when a new call starts")
+        }
     }
 }
 
