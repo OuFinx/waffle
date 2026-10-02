@@ -59,7 +59,7 @@ final class Model: ObservableObject {
     static let shared = Model()
 
     @Published var meetings: [MeetingRow] = []
-    @Published var scope: Scope = .all { didSet { settingsOpen = false; openReport = nil; choosing = nil; pageChanged() } }
+    @Published var scope: Scope = .all { didSet { settingsOpen = false; openReport = nil; choosing = nil; selecting = false; pageChanged() } }
     @Published var selected: String? { didSet { if selected != nil { settingsOpen = false; openReport = nil }; pageChanged() } }
     /// A report is shown in place of the meeting or folder page.
     @Published var openReport: OpenReport? { didSet { pageChanged() } }
@@ -499,8 +499,12 @@ final class Model: ObservableObject {
     @Published var writingUpdate: Set<String> = []  // folders whose report Claude is writing
 
     /// Meetings being ticked for a report of this folder (the checkboxes in its meeting list).
-    @Published var choosing: String? { didSet { chosen = [] } }
+    @Published var choosing: String? { didSet { chosen = []; if choosing != nil { selecting = false } } }
     @Published var chosen: Set<String> = []
+
+    /// Meetings being ticked in the list to delete several at once (Select in the list's toolbar).
+    @Published var selecting = false { didSet { picked = []; if selecting { choosing = nil } } }
+    @Published var picked: Set<String> = []
 
     /// The folder's report period when none is picked (folder settings; This Week by default).
     func reportPeriod(_ folder: String) -> ReportPeriod { Store.folderMeta[folder]?["period"].flatMap(ReportPeriod.init) ?? .week }
@@ -555,10 +559,33 @@ final class Model: ObservableObject {
         } catch {
             return fail("Could not delete: \(error.localizedDescription)")
         }
+        forget(id)
+        reload()
+    }
+
+    /// Asks once, then moves the ticked meetings to the Trash. One that is recording or being summarised is left out.
+    func deleteMeetings(_ wanted: Set<String>) {
+        guard !wanted.isEmpty else { return }
+        let ids = meetings.map(\.id).filter { wanted.contains($0) && !($0 == activeId && busy) }
+        guard !ids.isEmpty else { return fail("These meetings are still recording or being summarised") }
+        let n = ids.count
+        guard confirm("Delete \(n) meeting\(n == 1 ? "" : "s")?", "Their transcripts, notes, summaries and chats will be moved to the Trash. You can only get them back from the Trash in Finder.",
+                      n == 1 ? "Delete Meeting" : "Delete \(n) Meetings") else { return }
+        var failed = 0
+        for id in ids {
+            guard (try? FileManager.default.trashItem(at: Store.dir(id), resultingItemURL: nil)) != nil else { failed += 1; continue }
+            forget(id)
+        }
+        selecting = false
+        reload()
+        if failed > 0 { fail("Could not delete \(failed) meeting\(failed == 1 ? "" : "s")") }
+    }
+
+    /// A deleted meeting out of the app's state.
+    private func forget(_ id: String) {
         if id == activeId { activeId = nil; lines = []; status = .idle; detail = "" }
         if selected == id { selected = nil }
         threads["m:\(id)"] = nil
-        reload()
     }
 
     /// Asks first, then deletes the line.

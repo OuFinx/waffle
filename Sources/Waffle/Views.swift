@@ -67,7 +67,7 @@ struct MainView: View {
             hits = await Task.detached { Store.search(q) }.value
         }
         .onChange(of: model.scope) { query = "" }
-        .onExitCommand { if model.settingsOpen { model.settingsOpen = false } else if model.openReport != nil { model.openReport = nil } else { model.selected = nil } }  // Esc: close Settings, a report, or back to the home or folder page
+        .onExitCommand { if model.selecting { model.selecting = false } else if model.settingsOpen { model.settingsOpen = false } else if model.openReport != nil { model.openReport = nil } else { model.selected = nil } }  // Esc: stop selecting, close Settings, a report, or back to the home or folder page
         .onAppear {
             visibility = sidebarOpen ? .all : .doubleColumn
             model.openMain = { openWindow(id: "main") }
@@ -312,20 +312,16 @@ struct MeetingList: View {
     var body: some View {
         List(selection: $model.selected) {
             if let hits {
-                ForEach(hits) { h in MeetingRowView(id: h.id, snippet: h.snippet, query: query, showDay: true).card(model.selected == h.id).tag(h.id).draggable(h.id).overlay(RightClick { rowMenu(h.id) }) }
+                ForEach(hits) { h in
+                    if ticking { tickRow(MeetingRowView(id: h.id, snippet: h.snippet, query: query, showDay: true), h.id) }
+                    else { MeetingRowView(id: h.id, snippet: h.snippet, query: query, showDay: true).card(model.selected == h.id).tag(h.id).draggable(h.id).overlay(RightClick { rowMenu(h.id) }) }
+                }
             } else {
                 ForEach(days, id: \.day) { g in
                     Section {
                         ForEach(g.rows) { m in
-                            if folder != nil && model.choosing == folder {
-                                // Picking meetings for a report: a checkbox on each card; clicking it ticks it.
-                                HStack(spacing: 8) {
-                                    Image(systemName: model.chosen.contains(m.id) ? "checkmark.circle.fill" : "circle")
-                                        .font(.title3).foregroundStyle(model.chosen.contains(m.id) ? Color.accentColor : .secondary)
-                                    MeetingRowView(id: m.id).card(false)
-                                }
-                                .contentShape(Rectangle())
-                                .onTapGesture { if model.chosen.contains(m.id) { model.chosen.remove(m.id) } else { model.chosen.insert(m.id) } }
+                            if ticking {
+                                tickRow(MeetingRowView(id: m.id), m.id)
                             } else {
                                 MeetingRowView(id: m.id).card(model.selected == m.id).tag(m.id).draggable(m.id)  // drop it on a folder in the sidebar
                                     .overlay(RightClick { rowMenu(m.id) })
@@ -346,26 +342,44 @@ struct MeetingList: View {
                 else { Placeholder(symbol: "tray", title: "No meetings", text: model.scope == .all ? "Click New to record your first meeting." : "Meetings show up here as you record them.") }
             }
         }
-        .onDeleteCommand { if let id = model.selected { model.delete(id) } }  // Delete key on the selected meeting
+        .onDeleteCommand { if model.selecting { model.deleteMeetings(model.picked.intersection(hits?.map(\.id) ?? rows.map(\.id))) } else if let id = model.selected { model.delete(id) } }  // Delete key: the ticked meetings, else the selected one
         .scrollContentBackground(.hidden).background(paper)  // the same soft surface as the page, not a glaring white column
         .safeAreaInset(edge: .bottom) {
-            if let folder, hits == nil, !rows.isEmpty { ReportBar(folder: folder).padding(14) }
-            if Model.scopeReports[model.scope] != nil, hits == nil, !rows.isEmpty { ScopeReportBar(scope: model.scope).padding(14) }
+            if model.selecting { SelectionBar(ids: hits?.map(\.id) ?? rows.map(\.id)).padding(14) }
+            else if let folder, hits == nil, !rows.isEmpty { ReportBar(folder: folder).padding(14) }
+            else if Model.scopeReports[model.scope] != nil, hits == nil, !rows.isEmpty { ScopeReportBar(scope: model.scope).padding(14) }
         }
         .navigationTitle(hits != nil ? "Search" : folderLeaf(model.scope.name))
         .toolbar {
             if #available(macOS 26.0, *) { ToolbarSpacer(.flexible) }
             // Right corner of the list column: one click starts a recording.
             if #available(macOS 26.0, *) {
-                ToolbarItem(placement: .primaryAction) { RecordButton() }.sharedBackgroundVisibility(.hidden)  // its own tinted capsule, not the toolbar's glass
+                ToolbarItem(placement: .primaryAction) { HStack(spacing: 8) { SelectButton(); RecordButton() } }.sharedBackgroundVisibility(.hidden)  // their own capsules, not the toolbar's glass
             } else {
-                ToolbarItem(placement: .primaryAction) { RecordButton() }
+                ToolbarItem(placement: .primaryAction) { HStack(spacing: 8) { SelectButton(); RecordButton() } }
             }
         }
     }
 }
 
 extension MeetingList {
+    /// Ticking: meetings to delete (Select), or meetings for this folder's report (Choose Meetings).
+    var ticking: Bool { model.selecting || (folder != nil && model.choosing == folder) }
+
+    /// A meeting card with a checkbox in front; clicking anywhere on it ticks it.
+    func tickRow(_ row: MeetingRowView, _ id: String) -> some View {
+        let on = model.selecting ? model.picked.contains(id) : model.chosen.contains(id)
+        return HStack(spacing: 8) {
+            Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                .font(.title3).foregroundStyle(on ? Color.accentColor : .secondary)
+            row.card(false)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if model.selecting { model.picked.formSymmetricDifference([id]) } else { model.chosen.formSymmetricDifference([id]) }
+        }
+    }
+
     /// The right-click menu of a meeting: folders (ticked where it is; No Folder takes it out of all) and Delete.
     func rowMenu(_ id: String) -> NSMenu {
         let menu = NSMenu()
@@ -390,6 +404,7 @@ extension MeetingList {
         folderItem.submenu = sub
         menu.addItem(folderItem)
         menu.addItem(.separator())
+        menu.addItem(ActionItem("Select Meetings...") { [model] in if !model.selecting { model.selecting = true }; model.picked.insert(id) })
         let delete = ActionItem("Delete Meeting...") { [model] in model.delete(id) }
         delete.isEnabled = !(id == model.activeId && model.busy)
         menu.addItem(delete)
@@ -570,6 +585,40 @@ struct RecordButton: View {
         .buttonStyle(.plain)
         .disabled(model.busy)
         .help("Record a new meeting (Command-N)")
+    }
+}
+
+/// The list's Select button: tick meetings to delete several at once. Highlighted while ticking; click again to stop.
+struct SelectButton: View {
+    @EnvironmentObject var model: Model
+    var body: some View {
+        Button { model.selecting.toggle() } label: { Image(systemName: model.selecting ? "checkmark.circle.fill" : "checkmark.circle") }
+            .buttonStyle(BarButton(tint: model.selecting ? .accentColor : nil, round: true))
+            .disabled(model.meetings.isEmpty && !model.selecting)
+            .help(model.selecting ? "Stop selecting" : "Select meetings, to delete several at once")
+    }
+}
+
+/// Under the list while ticking meetings: tick all or none of the shown ones, delete the ticked ones, or stop.
+struct SelectionBar: View {
+    @EnvironmentObject var model: Model
+    let ids: [String]  // the meetings the list shows
+
+    var body: some View {
+        // Only what the list shows counts: ticks hidden by a search since are never deleted unseen.
+        let shown = model.picked.intersection(ids), all = !ids.isEmpty && shown.count == Set(ids).count, n = shown.count
+        HStack(spacing: 8) {
+            Button { if all { model.picked.subtract(ids) } else { model.picked.formUnion(ids) } } label: { Text(all ? "None" : "All").pill() }
+                .help(all ? "Untick every meeting in the list" : "Tick every meeting in the list")
+            Button { model.deleteMeetings(shown) } label: {
+                Label(n == 0 ? "Delete" : "Delete (\(n))", systemImage: "trash").foregroundStyle(n == 0 ? Color.secondary : .red).pill()
+            }
+            .disabled(n == 0)
+            .help(n == 0 ? "Tick the meetings to delete in the list" : "Move the ticked meetings to the Trash")
+            Button { model.selecting = false } label: { Text("Done").pill() }.help("Stop selecting (Esc)")
+        }
+        .buttonStyle(.plain)
+        .lineLimit(1)
     }
 }
 
