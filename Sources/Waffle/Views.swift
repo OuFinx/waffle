@@ -127,6 +127,7 @@ struct Sidebar: View {
                     .overlay(RightClick {
                         let menu = NSMenu()
                         menu.addItem(ActionItem("New Subfolder...") { model.newFolderParent = f.name; creating = true })
+                        menu.addItem(ActionItem("Rename...") { newName = folderLeaf(f.name); renaming = f.name })
                         menu.addItem(ActionItem("Folder Settings...") { model.scope = .folder(f.name); model.selected = nil; model.folderSettings = f.name })
                         menu.addItem(.separator())
                         menu.addItem(ActionItem("Delete Folder...") { [model] in model.deleteFolder(f.name) })
@@ -152,9 +153,18 @@ struct Sidebar: View {
             .buttonStyle(.borderless).foregroundStyle(.secondary)
             .padding(.vertical, 10)
         }
+        .alert("Rename Folder", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+            TextField("Name", text: $newName)
+            Button("Rename") { if let f = renaming { model.renameFolder(f, to: newName) }; renaming = nil }
+            Button("Cancel", role: .cancel) { renaming = nil }
+        } message: {
+            Text("Its subfolders, meetings and reports keep their place.")
+        }
     }
 
     @State var creating = false
+    @State var renaming: String?  // the folder whose new name is being typed
+    @State var newName = ""
 }
 
 /// The `tree` command's lines left of a subfolder in the sidebar (see treeGuides): "│" for ancestors that go on, "├" or "└" for itself.
@@ -760,6 +770,15 @@ struct FolderSettings: View {
     @Environment(\.dismiss) var dismiss
     let folder: String
     @State var pickingEmoji = false
+    @State var name = ""
+
+    var parent: String? { folder.lastIndex(of: "/").map { String(folder[..<$0]) } }
+    var newName: String { name.trimmingCharacters(in: .whitespaces) }
+    /// The name was changed to one that can be used: not empty, no slash, not another folder's.
+    var renamed: Bool {
+        let full = parent.map { "\($0)/\(newName)" } ?? newName
+        return !newName.isEmpty && !newName.contains("/") && full != folder && (!model.folderExists(full) || full.lowercased() == folder.lowercased())
+    }
 
     var body: some View {
         let lib = model.library, chosen = lib.folders[folder]
@@ -773,8 +792,14 @@ struct FolderSettings: View {
                         }
                         .buttonStyle(.plain).help("Change the emoji")
                         .popover(isPresented: $pickingEmoji) { EmojiPicker(current: model.folderEmoji[folder] ?? "") { model.setFolderEmoji(folder, $0) } }
-                        Text(folderPath(folder)).font(.title3.bold())
+                        VStack(alignment: .leading, spacing: 2) {
+                            TextField("Name", text: $name).textFieldStyle(.plain).font(.title3.bold()).onSubmit(done)
+                            if let parent { Text("in \(folderPath(parent))").font(.callout).foregroundStyle(.secondary) }
+                        }
                     }
+                } footer: {
+                    if newName.contains("/") { Text("A slash is not allowed in a folder name.").font(.caption).foregroundStyle(.red) }
+                    else if !newName.isEmpty && newName != folderLeaf(folder) && !renamed { Text("There is already a folder with this name here.").font(.caption).foregroundStyle(.red) }
                 }
                 Section {
                     Picker("Period", selection: Binding(get: { model.reportPeriod(folder) }, set: { model.setReportPeriod(folder, $0) })) {
@@ -802,12 +827,20 @@ struct FolderSettings: View {
                 .foregroundStyle(.red).help("Delete this folder; its meetings stay")
                 Button("Manage Templates...") { dismiss(); model.settingsOpen = true }.help("Add or change templates in Settings")
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                Button("Done", action: done).keyboardShortcut(.defaultAction)
             }
             .padding([.horizontal, .bottom], 20)
         }
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
+        .onAppear { name = folderLeaf(folder) }
+    }
+
+    /// Closes the sheet; a changed name renames the folder (and reopens its page under the new name).
+    func done() {
+        let f = folder, n = newName, rename = renamed
+        dismiss()
+        if rename { DispatchQueue.main.async { model.renameFolder(f, to: n) } }
     }
 }
 
