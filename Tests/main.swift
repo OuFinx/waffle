@@ -79,6 +79,24 @@ assert(transcriptText(Array(labelled.prefix(3)), names: ["1-2": "Oleg"]).hasSuff
 // copy: "Who: what they said", a speaker's run of lines joined into one line
 assert(transcriptCopy(labelled, names: ["1-2": "Oleg"]) == "Speaker 1: Hi.\nMe: Hello.\nOleg: Status?\nThem: Later.", transcriptCopy(labelled, names: ["1-2": "Oleg"]))
 assert(transcriptCopy([line(0, "mic", "One."), line(1, "mic", "Two."), line(2, "sys", "Three.")]) == "Me: One. Two.\nThem: Three." && transcriptCopy([]) == "")
+// names from the call window: who talks, who is there, which voice is whom
+assert(personName("Oleg Petrenko (Host)") == "Oleg Petrenko" && personName("Олег Петренко, muted") == "Олег Петренко" && personName("Maryna O'Neil-Koval") == "Maryna O'Neil-Koval")
+assert(personName("Share Screen") == nil && personName("Oleg") == nil && personName("Oleg", minWords: 1) == "Oleg" && personName("room 42 B") == nil && personName("Leave") == nil)
+assert(speakingNames(["Talking: Oleg Petrenko", "Maryna Koval is speaking", "Ivan, speaking", "Anna Bell (speaking)", "Говорить: Олег", "Not speaking", "Mute"]) == ["Oleg Petrenko", "Maryna Koval", "Ivan", "Anna Bell", "Олег"], "\(speakingNames(["Talking: Oleg Petrenko", "Maryna Koval is speaking", "Ivan, speaking", "Anna Bell (speaking)", "Говорить: Олег", "Not speaking", "Mute"]))")
+assert(speakingNames(["You are speaking", "Speaking", "Oleg Petrenko"]).isEmpty)
+assert(rosterNames(["Weekly Sync | Microsoft Teams", "Sprint Planning", "Design Review", "Zoom Meeting - Oleg Petrenko"]).isEmpty)
+assert(rosterNames(["Oleg Petrenko (Host)", "Start Video", "Participants (3)", "Maryna Koval", "Oleg Petrenko", "Raise Hand"]) == ["Oleg Petrenko", "Maryna Koval"])
+let screenTurns = [Turn(start: 0, end: 10000, spk: "1-1"), Turn(start: 10000, end: 20000, spk: "1-2"), Turn(start: 20000, end: 30000, spk: "1-3")]
+let shown: [(t: Int, name: String)] = [(1000, "Oleg"), (4000, "Oleg"), (7000, "Oleg"), (9000, "Maryna"), (12000, "Maryna"), (15000, "Maryna"), (18000, "Maryna"), (22000, "Ivan"), (25000, "Ivan")]
+assert(screenSpeakers(screenTurns, shown) == ["1-1": "Oleg", "1-2": "Maryna"], "\(screenSpeakers(screenTurns, shown))")  // Ivan: only 2 looks
+assert(screenSpeakers(screenTurns.reversed(), shown) == ["1-1": "Oleg", "1-2": "Maryna"] && screenSpeakers([], shown).isEmpty)
+assert(screenSpeakers([Turn(start: 0, end: 9000, spk: "1-1"), Turn(start: 10000, end: 19000, spk: "1-2")], [(1000, "Oleg"), (2000, "Oleg"), (3000, "Oleg"), (11000, "Oleg"), (12000, "Oleg"), (13000, "Oleg")]).isEmpty)  // one name for two voices: neither
+let bare = [line(1000, "sys", "Hi all."), line(6000, "sys", "Next."), line(20000, "sys", "Both?"), line(30000, "mic", "Me.")]
+let fromScreen = labelFromScreen(bare, [(1500, "Oleg"), (7000, "Maryna"), (20500, "Oleg"), (21000, "Maryna"), (30500, "Ivan")])
+assert(fromScreen.map(\.spk) == ["@Oleg", "@Maryna", nil, nil], "\(fromScreen.map(\.spk))")
+assert(speakerNames(fromScreen, names: [:]) == ["@Oleg": "Oleg", "@Maryna": "Maryna"] && transcriptCopy(fromScreen).hasPrefix("Oleg: Hi all.\nMaryna: Next.\nThem: Both?"))
+let mixed = labelFromScreen(labelled, [(60500, "Ivan")])
+assert(speakerNames(mixed, names: [:]) == ["1-1": "Speaker 1", "1-2": "Speaker 2", "@Ivan": "Ivan"] && speakerNames([mixed[0], mixed[3]], names: [:]) == ["1-1": "Speaker 1", "@Ivan": "Ivan"])
 // old transcripts without "spk" still load
 assert(try! JSONDecoder().decode(Line.self, from: Data(#"{"t":1,"src":"sys","text":"x","part":1,"final":true}"#.utf8)).spk == nil)
 

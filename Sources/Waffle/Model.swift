@@ -146,6 +146,9 @@ final class Model: ObservableObject {
     private var part = 0
     private var turns: [Turn] = []  // who spoke when in "Them", for this recording
     private var recorder: Recorder?
+    private var screen: ScreenNames?  // names from the Zoom or Teams window, for this recording
+    private var talking: [(t: Int, name: String)] = []  // who the call window showed as talking, in time order
+    private var seenPeople: [String: Int] = [:]  // names the call window showed, and in how many looks
     private var lastSpeech: Date?, micSeen = false, micEmptySince: Date?
     private var toastTimer: Timer?
 
@@ -171,7 +174,7 @@ final class Model: ObservableObject {
             Store.setFolderEmoji(f, emoji[f]!)
         }
         folderEmoji = emoji
-        if let id = activeId { live.names = Store.speakers(id) }
+        if let id = activeId { updateNames(id) }
         revision += 1
         // ponytail: reads every transcript on each reload; fine for hundreds of meetings, keep lengths in meta.json if it gets slow
         let ids = meetings.map(\.id)
@@ -292,6 +295,7 @@ final class Model: ObservableObject {
         if id == activeId { return !busy }
         if busy { return false }
         lines = Store.lines(id)
+        turns = []; talking = []; seenPeople = [:]  // the last recording's, another meeting
         part = lines.map(\.part).max() ?? 0
         activeId = id; status = .done; detail = ""
         return true
@@ -302,7 +306,13 @@ final class Model: ObservableObject {
         part += 1
         lastSpeech = nil; micSeen = false; micEmptySince = nil; callEnding = false
         Store.updateMeta(id, ["recording": true])  // stays set if the app dies mid-meeting, see interrupted()
-        status = .recording; detail = ""; hearing = []; micMuted = false; turns = []
+        status = .recording; detail = ""; hearing = []; micMuted = false; turns = []; talking = []; seenPeople = [:]
+        if ScreenNames.enabled {
+            let s = ScreenNames()
+            s.onLook = { [weak self] in self?.addLook(id, $0) }
+            s.start()
+            screen = s
+        }
         let rec = Recorder()
         rec.onWindow = { [weak self] src, w, final, segs in self?.addWindow(id, src, w, final, segs) }
         rec.onHearing = { [weak self] src, on in
@@ -320,17 +330,51 @@ final class Model: ObservableObject {
     private func addWindow(_ id: String, _ src: String, _ w: Int, _ final: Bool, _ segs: [Segment]) {
         guard activeId == id else { return }
         if !segs.isEmpty { lastSpeech = Date() }
-        lines = labelSpeakers(replaceWindow(lines, src: src, w: w, part: part, final: final, segments: segs), turns)
+        lines = labelled(replaceWindow(lines, src: src, w: w, part: part, final: final, segments: segs))
         if final { Store.saveLines(id, lines) }
     }
+
+    /// Who said each "Them" line: the diarized voice, else the person the call window showed talking then.
+    private func labelled(_ lines: [Line]) -> [Line] { labelFromScreen(labelSpeakers(lines, turns), talking) }
+
+    /// The names of the active meeting's voices: the ones the user (or a summary) gave, else what the call window settled.
+    private func updateNames(_ id: String) {
+        live.names = screenSpeakers(turns, talking).merging(Store.speakers(id)) { $1 }
+    }
+
+    /// What the call window showed: who is in the call, and who is talking, which can name a voice or a line.
+    private func addLook(_ id: String, _ look: ScreenLook) {
+        guard activeId == id, status == .recording else { return }
+        for p in look.people { seenPeople[p, default: 0] += 1 }
+        // The call app shows the user as talking too: while the microphone hears speech, a name shown talking may be the user's.
+        guard !look.talking.isEmpty, !hearing.contains("mic") else { return }
+        talking += look.talking.map { (t: look.t, name: $0) }
+        let before = lines
+        lines = labelled(lines)
+        if lines != before { Store.saveLines(id, lines) }
+        updateNames(id)
+    }
+
+    /// Keeps what the call window showed with the meeting: names for the voices it settled (where none was given), and who was in
+    /// the call, for the summary.
+    private func saveScreenNames(_ id: String) {
+        let given = Store.speakers(id)
+        for (spk, name) in screenSpeakers(turns, talking) where given[spk] == nil { Store.nameSpeaker(id, spk, name) }
+        let people = Set(livePeople).union(Store.people(id))
+        if !people.isEmpty { Store.updateMeta(id, ["people": people.sorted()]) }
+    }
+
+    /// The people the call window showed in this recording; seen once may be a misread.
+    private var livePeople: [String] { Set(seenPeople.filter { $0.value >= 2 }.keys).union(talking.map { $0.name }).sorted() }
 
     /// Voices numbered per recording part, so a resumed meeting's "Speaker 1" is not mixed up with the first part's.
     private func addTurns(_ id: String, _ new: [Turn]) {
         guard activeId == id else { return }
         turns += new.map { Turn(start: $0.start, end: $0.end, spk: "\(part)-\($0.spk)") }
         let before = lines
-        lines = labelSpeakers(lines, turns)
+        lines = labelled(lines)
         if lines != before { Store.saveLines(id, lines) }
+        if !talking.isEmpty { updateNames(id) }
     }
 
     /// Give a voice of "Them" a name, for this meeting's transcript, summaries and answers.
@@ -351,12 +395,14 @@ final class Model: ObservableObject {
         guard status == .recording, let id = activeId, let rec = recorder else { return }
         status = .finalizing
         callEnding = false
+        screen?.stop(); screen = nil
         detail = "\(reason): finishing the last sentences"
         rec.stop { [self] in  // the recorder finalises its last windows first
             recorder = nil
             hearing = []
             lines = lines.map { var l = $0; l.final = true; return l }  // a window cut off by the stop is as final as it gets
             Store.saveLines(id, lines)
+            saveScreenNames(id)
             Store.write(transcriptText(lines, names: Store.speakers(id)) + "\n", Store.dir(id).appendingPathComponent("transcript.md"))
             Store.updateMeta(id, ["recording": false])
             summarize()
@@ -423,6 +469,7 @@ final class Model: ObservableObject {
     /// Quitting mid-meeting: keep what was heard. The meeting stays marked as recording, so it shows as interrupted next time.
     func quit() {
         guard let rec = recorder, let id = activeId else { return }
+        screen?.stop()
         rec.shutdown()
         Store.saveLines(id, lines.map { var l = $0; l.final = true; return l })
     }
@@ -634,12 +681,14 @@ final class Model: ObservableObject {
         t.append(qa)
         threads[key] = t
         let live = key.hasPrefix("m:") && String(key.dropFirst(2)) == activeId ? lines : nil
+        // The meeting that records: the names and people the call window showed so far, not yet saved with it.
+        let liveNames = live == nil ? nil : self.live.names, livePeople = live == nil || status != .recording ? nil : self.livePeople
         DispatchQueue.global().async {
             var answer: String, failed = false
             do {
                 if key.hasPrefix("m:") {
                     let id = String(key.dropFirst(2))
-                    answer = try AI.ask(system: askPrompt, prompt: q, context: Store.context(id, lines: live ?? Store.lines(id)), cwd: Store.dir(id))
+                    answer = try AI.ask(system: askPrompt, prompt: q, context: Store.context(id, lines: live ?? Store.lines(id), names: liveNames, people: livePeople), cwd: Store.dir(id))
                     Store.appendChat(id, Chat(t: Int(Date().timeIntervalSince1970 * 1000), q: q, a: answer))
                 } else {
                     let folder = key.hasPrefix("f:") ? String(key.dropFirst(2)) : nil

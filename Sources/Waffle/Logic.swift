@@ -47,12 +47,14 @@ func firstIndex(_ count: Int, where ok: (Int) -> Bool) -> Int {
 }
 
 /// What each voice of "Them" is called: the name the user gave it, else "Speaker N" in order of first appearance. A single unnamed
-/// voice is just "Them".
+/// voice is just "Them". A voice "@Name" (lines the call window named, see labelFromScreen) is called by that name.
 func speakerNames(_ lines: [Line], names: [String: String]) -> [String: String] {
-    var order: [String] = []
-    for l in lines where l.src == "sys" { if let s = l.spk, !order.contains(s) { order.append(s) } }
-    var out: [String: String] = [:]
-    for (i, s) in order.enumerated() { out[s] = names[s] ?? (order.count == 1 ? "Them" : "Speaker \(i + 1)") }
+    var order: [String] = [], out: [String: String] = [:]
+    for l in lines where l.src == "sys" {
+        guard let s = l.spk, out[s] == nil, !order.contains(s) else { continue }
+        if s.hasPrefix("@") { out[s] = names[s] ?? String(s.dropFirst()) } else { order.append(s) }
+    }
+    for (i, s) in order.enumerated() { out[s] = names[s] ?? (order.count == 1 && out.isEmpty ? "Them" : "Speaker \(i + 1)") }
     return out
 }
 
@@ -275,7 +277,9 @@ func randomFolderEmoji(avoiding used: some Collection<String> = [String]()) -> S
 /// Rules for every summary, whatever the template: who is who, English, no invented facts.
 let summaryBase = """
 You turn a meeting transcript and the user's own rough notes into meeting notes.
-Speaker "Me" is the user (their microphone). Every other label is someone else on the call: a name, "Speaker 2" (a voice told apart by sound, name unknown), or "Them" (everyone else together; tell people apart by names and context when possible).
+Speaker "Me" is the user (their microphone). Every other label is someone else on the call: a name, "Speaker 2" (a voice told apart by sound, name unknown), or "Them" (everyone else together).
+A label that first shows up partway through is a new voice joining the conversation. Lines labelled "Them" can be several people: tell them apart by what they say and by turn-taking (a question and its answer, a greeting, someone addressed by name), and credit a point to a person only when that is clear.
+If the input lists the people seen in the call window (the names Zoom or Teams showed), they are most likely the people in the call (the list can hold a stray non-name): spell their names as listed, and use them to tell who a voice is when the conversation supports it.
 The transcript is machine-made: fix obvious recognition errors from context, never invent facts.
 The meeting may be in any language, or several. Always write the notes in English; keep names, product names and ticket numbers as spoken.
 The user's notes show what they care about: make sure those topics are covered and expanded with details from the transcript.
@@ -290,7 +294,7 @@ If the meeting clearly belongs to other existing folders too, pick them; never i
 Output exactly this layout:
 line 1: "TITLE: <3-7 word English title of the meeting>"
 line 2: "FOLDERS: <comma-separated existing folder names this meeting belongs to, including the given ones; empty if none>"
-line 3: "SPEAKERS: <for transcript labels like "Speaker 2" whose real name is clear from the conversation (someone addresses them by name, they introduce themselves): "Speaker 2 = Oleg", comma-separated; empty if none is clear; never guess>"
+line 3: "SPEAKERS: <for transcript labels like "Speaker 2" whose real name is clear from the conversation (someone addresses them by name, they introduce themselves, or only one of the people seen in the call window fits what they say): "Speaker 2 = Oleg", comma-separated; empty if none is clear; never guess>"
 then the notes, in Markdown. In the notes, call people by those names.
 """
 
@@ -469,9 +473,101 @@ let builtinTemplates: [Template] = [
 
 let askPrompt = """
 You help the user during or after a meeting. You get the transcript and the user's notes, then a question.
-Speaker "Me" is the user; every other label (a name, "Speaker 2", "Them") is someone else on the call. The transcript is machine-made and may have recognition errors.
+Speaker "Me" is the user; every other label (a name, "Speaker 2", "Them") is someone else on the call; "Them" can be several people. If the input lists the people seen in the call window, they are most likely the people in the call. The transcript is machine-made and may have recognition errors.
 Answer briefly and only from the transcript; say so if it is not there. Reply in the language of the question.
 """
+
+// MARK: names from the call window (Zoom, Microsoft Teams), see ScreenNames
+
+/// Words of the call apps' own buttons and labels, and words that start sentences: a "name" with one of them is not a person.
+private let appWords: Set<String> = [
+    "share", "screen", "start", "stop", "video", "audio", "mute", "unmute", "muted", "unmuted", "chat", "participants", "people", "leave",
+    "end", "meeting", "meetings", "more", "reactions", "react", "raise", "hand", "view", "gallery", "speaker", "record", "recording",
+    "apps", "whiteboard", "whiteboards", "zoom", "teams", "microsoft", "camera", "mic", "microphone", "settings", "join", "rooms",
+    "room", "calendar", "activity", "files", "help", "search", "notes", "captions", "security", "host", "options", "everyone",
+    "waiting", "new", "window", "close", "minimize", "full", "exit", "show", "hide", "invite", "summary", "transcript", "breakout",
+    "you", "your", "not", "no", "is", "are", "the", "this", "that", "and", "or", "of", "to", "in", "on", "talking", "speaking",
+    "good", "morning", "afternoon", "evening", "hello", "hi", "thanks", "thank", "okay", "yes", "today", "tomorrow", "call", "calls",
+    "home", "chats", "channel", "channels", "copilot", "phone", "contacts", "team", "general", "posts", "recap", "layout", "focus",
+    // meeting titles, which the window and calendar labels show next to the people
+    "sync", "review", "standup", "stand-up", "planning", "sprint", "weekly", "daily", "monthly", "demo", "retro", "retrospective",
+    "product", "design", "project", "update", "updates", "kickoff", "workshop", "interview", "training", "office", "hours", "all-hands",
+    "town", "hall", "huddle", "catch-up", "status", "report", "roadmap", "strategy", "onboarding", "session", "webinar", "agenda",
+    "check-in", "one-on-one", "standing", "sales", "support", "engineering", "marketing", "board", "committee", "personal",
+]
+
+/// A name as the call app shows it, without what the app adds: "Oleg Petrenko (Host)", "Oleg Petrenko, muted" -> "Oleg Petrenko".
+/// nil when it does not look like a person's name: `minWords` to 4 words, each starting with a capital letter, letters only.
+func personName(_ raw: String, minWords: Int = 2) -> String? {
+    let cut = raw.components(separatedBy: CharacterSet(charactersIn: ",(|[\n\u{2022}")).first ?? raw
+    let words = cut.split(whereSeparator: \.isWhitespace).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".:;!?\"")) }.filter { !$0.isEmpty }
+    guard (minWords...4).contains(words.count), words.joined().count <= 40 else { return nil }
+    for w in words {
+        guard let f = w.first, f.isUppercase, w.allSatisfy({ $0.isLetter || $0 == "-" || $0 == "'" || $0 == "\u{2019}" }), !appWords.contains(w.lowercased()) else { return nil }
+    }
+    return words.joined(separator: " ")
+}
+
+private let talkingFirst = regex(#"^\s*(?:talking|speaking|говорить|говорит|розмовляє)\s*:\s*(.+)$"#, .caseInsensitive)
+private let talkingAfter = regex(#"^(.+?)(?:\s+is|\s*,|\s*\(|\s+-)?\s*(?:is\s+)?\b(?:speaking|talking|говорить|говорит|розмовляє)\b"#, .caseInsensitive)
+
+/// Who the call window says is talking, from its labels or text: "Talking: Oleg Petrenko" (Zoom), "Oleg Petrenko is speaking",
+/// "Oleg Petrenko, speaking", "Oleg Petrenko (speaking)", also in Ukrainian. One-word names count here.
+func speakingNames(_ texts: [String]) -> [String] {
+    var out: [String] = []
+    for t in texts {
+        let ns = t as NSString, r = NSRange(location: 0, length: ns.length)
+        guard t.count <= 120, t.range(of: "not speaking", options: .caseInsensitive) == nil,
+              let m = talkingFirst.firstMatch(in: t, range: r) ?? talkingAfter.firstMatch(in: t, range: r),
+              let name = personName(ns.substring(with: m.range(at: 1)), minWords: 1), !out.contains(name) else { continue }
+        out.append(name)
+    }
+    return out
+}
+
+/// The people the call window shows (video tiles, participant list): names of 2 to 4 capitalised words, in the order first seen.
+func rosterNames(_ texts: [String]) -> [String] {
+    var out: [String] = []
+    for t in texts where t.count <= 80 && !t.contains("|") && !t.contains(" - ") {  // "Weekly Sync | Microsoft Teams": a window title if let n = personName(t), !out.contains(n) { out.append(n) } }
+    return out
+}
+
+/// Names for the voices of "Them" from who the call window showed as talking (t: epoch ms) during their turns. A voice gets a name when
+/// it was shown in at least 3 looks and two thirds of the voice's looks; a name two voices would get goes to neither.
+func screenSpeakers(_ turns: [Turn], _ talking: [(t: Int, name: String)]) -> [String: String] {
+    guard !turns.isEmpty, !talking.isEmpty else { return [:] }
+    let turns = zip(turns, turns.dropFirst()).allSatisfy { $0.start <= $1.start } ? turns : turns.sorted { $0.start < $1.start }
+    let longest = turns.map { $0.end - $0.start }.max() ?? 0, lag = 1000  // the app shows a voice a moment after it starts
+    var votes: [String: [String: Int]] = [:]
+    for s in talking {
+        var j = firstIndex(turns.count) { turns[$0].start >= s.t - longest - lag }
+        while j < turns.count, turns[j].start <= s.t {
+            if s.t < turns[j].end + lag { votes[turns[j].spk, default: [:]][s.name, default: 0] += 1 }
+            j += 1
+        }
+    }
+    var out: [String: String] = [:]
+    for (spk, v) in votes {
+        let total = v.values.reduce(0, +)
+        if let top = v.max(by: { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) }), top.value >= 3, top.value * 3 >= total * 2 { out[spk] = top.key }
+    }
+    let taken = Dictionary(grouping: out.values) { $0 }
+    return out.filter { taken[$0.value]?.count == 1 }
+}
+
+/// "Them" lines that no diarized voice covers get the person the call window showed as the only one talking around then (from 1 s
+/// before the line to 4 s after), as the voice "@Name". `talking` is in time order.
+func labelFromScreen(_ lines: [Line], _ talking: [(t: Int, name: String)]) -> [Line] {
+    guard !talking.isEmpty else { return lines }
+    var out = lines
+    for i in out.indices where out[i].src == "sys" && (out[i].spk == nil || out[i].spk!.hasPrefix("@")) {
+        let t = out[i].t
+        var j = firstIndex(talking.count) { talking[$0].t >= t - 1000 }, near = Set<String>()
+        while j < talking.count, talking[j].t <= t + 4000 { near.insert(talking[j].name); j += 1 }
+        if near.count == 1 { out[i].spk = "@" + near.first! }
+    }
+    return out
+}
 
 // MARK: folders and subfolders: a subfolder is a path, "Project/Standups"
 
