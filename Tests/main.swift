@@ -96,6 +96,16 @@ let fromScreen = labelFromScreen(bare, [(1500, "Oleg"), (7000, "Maryna"), (20500
 assert(fromScreen.map(\.spk) == ["@Oleg", "@Maryna", nil, nil], "\(fromScreen.map(\.spk))")
 assert(speakerNames(fromScreen, names: [:]) == ["@Oleg": "Oleg", "@Maryna": "Maryna"] && transcriptCopy(fromScreen).hasPrefix("Oleg: Hi all.\nMaryna: Next.\nThem: Both?"))
 
+// names stay once given: a voice keeps its name, a line keeps the person it showed
+assert(settleNames(["1-1": "Oleg"], ["1-1": "Maryna", "1-2": "Oleg", "1-3": "Ivan"]) == ["1-1": "Oleg", "1-3": "Ivan"])
+assert(settleNames(["1-1": "Oleg"], [:]) == ["1-1": "Oleg"])  // the votes moved away: the name stays
+func said(_ t: Int, _ spk: String?) -> Line { var l = line(t, "sys", "Hi."); l.spk = spk; return l }
+let kept = keepNamed([said(0, "1-1"), said(5000, "@Maryna"), said(9000, nil), said(12000, "@Ivan")], [said(0, "1-2"), said(5000, "1-3"), said(9000, "1-2"), said(12000, "@Olena")], ["1-1": "Oleg"])
+assert(kept.lines.map(\.spk) == ["1-1", "1-3", "1-2", "@Ivan"], "\(kept.lines.map(\.spk))")  // Oleg stays; Maryna's voice learns her name; Them may get a voice; Ivan stays
+assert(kept.names == ["1-1": "Oleg", "1-3": "Maryna"], "\(kept.names)")
+assert(keepNamed([said(0, "@Oleg")], [said(0, "1-2")], ["1-1": "Oleg"]).lines.map(\.spk) == ["@Oleg"])  // the name is another voice's: the line keeps it
+assert(keepNamed([said(0, "1-1")], [said(0, "1-2")], ["1-1": "Oleg", "1-2": "Oleg"]).lines.map(\.spk) == ["1-2"])  // same name shown either way
+
 assert(renamePeople(["Kabak Shamnmss", "Oleg Petrenko", "Babak Shammas"], ["Kabak Shamnmss": "Babak Shammas"]) == ["Babak Shammas", "Oleg Petrenko"])
 
 // the call app's frame around who talks: tiles with a name in the corner or in the middle, an avatar ring, not buttons or other colours

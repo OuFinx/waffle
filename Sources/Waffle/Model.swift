@@ -150,6 +150,7 @@ final class Model: ObservableObject {
     private var talking: [(t: Int, name: String)] = []  // who the call window showed as talking, in time order
     private var seenPeople: [String: Int] = [:]  // names the call window showed, and in how many looks
     private var renamed: [String: String] = [:]  // names read from the call window that the user corrected while recording: old -> new
+    private var settled: [String: String] = [:]  // names the call window gave to voices in this recording; they stay, see settleNames
     private var lastSpeech: Date?, micSeen = false, micEmptySince: Date?
     private var toastTimer: Timer?
 
@@ -296,7 +297,7 @@ final class Model: ObservableObject {
         if id == activeId { return !busy }
         if busy { return false }
         lines = Store.lines(id)
-        turns = []; talking = []; seenPeople = [:]; renamed = [:]  // the last recording's, another meeting
+        turns = []; talking = []; seenPeople = [:]; renamed = [:]; settled = [:]  // the last recording's, another meeting
         part = lines.map(\.part).max() ?? 0
         activeId = id; status = .done; detail = ""
         return true
@@ -307,7 +308,7 @@ final class Model: ObservableObject {
         part += 1
         lastSpeech = nil; micSeen = false; micEmptySince = nil; callEnding = false
         Store.updateMeta(id, ["recording": true])  // stays set if the app dies mid-meeting, see interrupted()
-        status = .recording; detail = ""; hearing = []; micMuted = false; turns = []; talking = []; seenPeople = [:]; renamed = [:]
+        status = .recording; detail = ""; hearing = []; micMuted = false; turns = []; talking = []; seenPeople = [:]; renamed = [:]; settled = [:]
         if ScreenNames.enabled {
             let s = ScreenNames()
             s.onLook = { [weak self] in self?.addLook(id, $0) }
@@ -335,12 +336,22 @@ final class Model: ObservableObject {
         if final { Store.saveLines(id, lines) }
     }
 
-    /// Who said each "Them" line: the diarized voice, else the person the call window showed talking then.
-    private func labelled(_ lines: [Line]) -> [Line] { labelFromScreen(labelSpeakers(lines, turns), talking) }
+    /// Who said each "Them" line: the diarized voice, else the person the call window showed talking then. A line that shows a
+    /// person's name keeps it (see keepNamed).
+    private func labelled(_ lines: [Line]) -> [Line] {
+        let (out, names) = keepNamed(lines, labelFromScreen(labelSpeakers(lines, turns), talking), live.names)
+        if names != live.names, let id = activeId {
+            for (spk, name) in names where live.names[spk] == nil { settled[spk] = name }
+            updateNames(id)
+        }
+        return out
+    }
 
-    /// The names of the active meeting's voices: the ones the user (or a summary) gave, else what the call window settled.
+    /// The names of the active meeting's voices: the ones the user (or a summary) gave, else what the call window settled. Once a
+    /// voice has a name it keeps it, so the transcript does not flip between a name, "Speaker 2" and "Them" as more looks come in.
     private func updateNames(_ id: String) {
-        live.names = screenSpeakers(turns, talking).merging(Store.speakers(id)) { $1 }
+        settled = settleNames(settled, screenSpeakers(turns, talking))
+        live.names = settled.merging(Store.speakers(id)) { $1 }
     }
 
     /// What the call window showed: who is in the call, and who is talking, which can name a voice or a line.
@@ -360,7 +371,8 @@ final class Model: ObservableObject {
     /// the call, for the summary.
     private func saveScreenNames(_ id: String) {
         let given = Store.speakers(id)
-        for (spk, name) in screenSpeakers(turns, talking) where given[spk] == nil { Store.nameSpeaker(id, spk, name) }
+        updateNames(id)
+        for (spk, name) in settled where given[spk] == nil { Store.nameSpeaker(id, spk, name) }
         let people = renamePeople(livePeople + Store.people(id), renamed)
         if !people.isEmpty { Store.updateMeta(id, ["people": people]) }
     }

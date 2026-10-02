@@ -571,6 +571,29 @@ func labelFromScreen(_ lines: [Line], _ talking: [(t: Int, name: String)]) -> [L
     return out
 }
 
+/// Names of voices that stay once given: the ones settled so far, plus what the call window names now for a voice without a name, when
+/// no other voice has that name. A name never moves to another voice or goes away as more looks come in.
+func settleNames(_ settled: [String: String], _ fresh: [String: String]) -> [String: String] {
+    var out = settled
+    for (spk, name) in fresh.sorted(by: { $0.key < $1.key }) where out[spk] == nil && !out.values.contains(name) { out[spk] = name }
+    return out
+}
+
+/// Lines labelled again (`after`, from `before`) keep a person's name once they show one: a late turn or the next line can move a
+/// line to a voice with no name, which would turn "Oleg" back into "Speaker 2" or "Them". A line the call window named ("@Oleg") that
+/// a voice with no name now covers names that voice instead, so its other lines get the name too. Returns the lines and the voices'
+/// names with the ones learned.
+func keepNamed(_ before: [Line], _ after: [Line], _ names: [String: String]) -> (lines: [Line], names: [String: String]) {
+    var names = names, out = after
+    func shown(_ s: String?) -> String? { s.flatMap { names[$0] ?? ($0.hasPrefix("@") ? String($0.dropFirst()) : nil) } }
+    for i in out.indices where i < before.count && before[i].t == after[i].t && before[i].src == after[i].src && before[i].spk != after[i].spk {
+        guard let old = shown(before[i].spk) else { continue }
+        if before[i].spk!.hasPrefix("@"), let v = after[i].spk, !v.hasPrefix("@"), names[v] == nil, !names.values.contains(old) { names[v] = old }
+        if shown(after[i].spk) != old { out[i].spk = before[i].spk }
+    }
+    return (out, names)
+}
+
 /// The people seen in a call with the names the user corrected (old -> new), once each, sorted.
 func renamePeople(_ people: [String], _ renamed: [String: String]) -> [String] { Set(people.map { renamed[$0] ?? $0 }).sorted() }
 
