@@ -149,6 +149,7 @@ final class Model: ObservableObject {
     private var screen: ScreenNames?  // names from the Zoom or Teams window, for this recording
     private var talking: [(t: Int, name: String)] = []  // who the call window showed as talking, in time order
     private var seenPeople: [String: Int] = [:]  // names the call window showed, and in how many looks
+    private var renamed: [String: String] = [:]  // names read from the call window that the user corrected while recording: old -> new
     private var lastSpeech: Date?, micSeen = false, micEmptySince: Date?
     private var toastTimer: Timer?
 
@@ -295,7 +296,7 @@ final class Model: ObservableObject {
         if id == activeId { return !busy }
         if busy { return false }
         lines = Store.lines(id)
-        turns = []; talking = []; seenPeople = [:]  // the last recording's, another meeting
+        turns = []; talking = []; seenPeople = [:]; renamed = [:]  // the last recording's, another meeting
         part = lines.map(\.part).max() ?? 0
         activeId = id; status = .done; detail = ""
         return true
@@ -306,7 +307,7 @@ final class Model: ObservableObject {
         part += 1
         lastSpeech = nil; micSeen = false; micEmptySince = nil; callEnding = false
         Store.updateMeta(id, ["recording": true])  // stays set if the app dies mid-meeting, see interrupted()
-        status = .recording; detail = ""; hearing = []; micMuted = false; turns = []; talking = []; seenPeople = [:]
+        status = .recording; detail = ""; hearing = []; micMuted = false; turns = []; talking = []; seenPeople = [:]; renamed = [:]
         if ScreenNames.enabled {
             let s = ScreenNames()
             s.onLook = { [weak self] in self?.addLook(id, $0) }
@@ -360,8 +361,8 @@ final class Model: ObservableObject {
     private func saveScreenNames(_ id: String) {
         let given = Store.speakers(id)
         for (spk, name) in screenSpeakers(turns, talking) where given[spk] == nil { Store.nameSpeaker(id, spk, name) }
-        let people = Set(livePeople).union(Store.people(id))
-        if !people.isEmpty { Store.updateMeta(id, ["people": people.sorted()]) }
+        let people = renamePeople(livePeople + Store.people(id), renamed)
+        if !people.isEmpty { Store.updateMeta(id, ["people": people]) }
     }
 
     /// The people the call window showed in this recording; seen once may be a misread.
@@ -377,9 +378,19 @@ final class Model: ObservableObject {
         if !talking.isEmpty { updateNames(id) }
     }
 
-    /// Give a voice of "Them" a name, for this meeting's transcript, summaries and answers.
+    /// Give a voice of "Them" a name, for this meeting's transcript, summaries and answers. A name misread from the call window is
+    /// corrected in the meeting's people too, as the summary spells names the way that list does.
     func nameSpeaker(_ id: String, _ spk: String, _ name: String) {
+        let active = activeId == id
+        let old = speakerNames(active ? lines : Store.lines(id), names: active ? live.names : Store.speakers(id))[spk]
         Store.nameSpeaker(id, spk, name)
+        let new = name.trimmingCharacters(in: .whitespaces)
+        if let old, !new.isEmpty, old != new {
+            if active { renamed[old] = new }
+            let people = Store.people(id)
+            if people.contains(old) { Store.updateMeta(id, ["people": renamePeople(people, [old: new])]) }
+        }
+        if active { updateNames(id) }
         reload()
     }
 

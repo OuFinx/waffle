@@ -96,6 +96,8 @@ let fromScreen = labelFromScreen(bare, [(1500, "Oleg"), (7000, "Maryna"), (20500
 assert(fromScreen.map(\.spk) == ["@Oleg", "@Maryna", nil, nil], "\(fromScreen.map(\.spk))")
 assert(speakerNames(fromScreen, names: [:]) == ["@Oleg": "Oleg", "@Maryna": "Maryna"] && transcriptCopy(fromScreen).hasPrefix("Oleg: Hi all.\nMaryna: Next.\nThem: Both?"))
 
+assert(renamePeople(["Kabak Shamnmss", "Oleg Petrenko", "Babak Shammas"], ["Kabak Shamnmss": "Babak Shammas"]) == ["Babak Shammas", "Oleg Petrenko"])
+
 // the call app's frame around who talks: tiles with a name in the corner or in the middle, an avatar ring, not buttons or other colours
 func canvas(_ draw: (inout Pixels) -> Void) -> Pixels {
     var p = Pixels(w: 600, h: 400, rgba: [UInt8](repeating: 40, count: 600 * 400 * 4))

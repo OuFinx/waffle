@@ -571,6 +571,9 @@ func labelFromScreen(_ lines: [Line], _ talking: [(t: Int, name: String)]) -> [L
     return out
 }
 
+/// The people seen in a call with the names the user corrected (old -> new), once each, sorted.
+func renamePeople(_ people: [String], _ renamed: [String: String]) -> [String] { Set(people.map { renamed[$0] ?? $0 }).sorted() }
+
 /// A screenshot as RGBA bytes, rows from the top.
 struct Pixels {
     var w: Int, h: Int, rgba: [UInt8]
