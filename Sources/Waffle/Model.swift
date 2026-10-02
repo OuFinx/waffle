@@ -55,6 +55,14 @@ func confirm(_ title: String, _ text: String, _ button: String) -> Bool {
     return a.runModal() == .alertFirstButtonReturn
 }
 
+/// The live transcript of the meeting that is recording. An object of its own: it changes several times a second while people talk,
+/// and only the views that show it (the meeting page, the popup) should redraw then, not the whole window.
+final class Live: ObservableObject {
+    @Published var lines: [Line] = []
+    @Published var hearing: Set<String> = []  // voice heard, text not in yet: typing dots
+    @Published var names: [String: String] = [:]  // the names given to the voices of the active meeting, kept here so views need not read meta.json
+}
+
 final class Model: ObservableObject {
     static let shared = Model()
 
@@ -119,8 +127,9 @@ final class Model: ObservableObject {
     }
     private var activity: NSObjectProtocol?
     @Published var detail = ""
-    @Published var lines: [Line] = []
-    @Published var hearing: Set<String> = []  // voice heard, text not in yet: typing dots
+    let live = Live()
+    var lines: [Line] { get { live.lines } set { live.lines = newValue } }
+    var hearing: Set<String> { get { live.hearing } set { live.hearing = newValue } }
     /// "Me" is not transcribed while this is on, for meetings where you mostly listen and talk to the room. Off again for each new recording.
     @Published var micMuted = false {
         didSet {
@@ -162,6 +171,7 @@ final class Model: ObservableObject {
             Store.setFolderEmoji(f, emoji[f]!)
         }
         folderEmoji = emoji
+        if let id = activeId { live.names = Store.speakers(id) }
         revision += 1
         // ponytail: reads every transcript on each reload; fine for hundreds of meetings, keep lengths in meta.json if it gets slow
         let ids = meetings.map(\.id)

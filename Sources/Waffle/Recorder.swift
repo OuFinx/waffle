@@ -35,6 +35,7 @@ final class Recorder {
     private let diarQueue = DispatchQueue(label: "diarize", qos: .utility)
     private var diarizer: LSEENDDiarizer?
     private var diarStart = 0.0, diarFed = 0  // wall time of the first fed sample, samples fed since
+    private var diarPending: [Float] = []  // audio waiting for the next half second, see diarFeed
 
     init() {
         mic = Segmenter("mic", self); sys = Segmenter("sys", self); sysOut = SysOutput(self)
@@ -136,7 +137,11 @@ final class Recorder {
         if let s { s.stopCapture { _ in sem.signal() }; _ = sem.wait(timeout: .now() + 2) }
         if flush { mic.flush(); sys.flush() }
         diarQueue.sync {  // the last turns go out before stop's done callback
-            if flush, let d = diarizer { emit(try? d.finalizeSession()) }
+            if flush, let d = diarizer {
+                if !diarPending.isEmpty { try? d.addAudio(diarPending, sourceSampleRate: 16000); diarFed += diarPending.count; emit(try? d.process()) }
+                emit(try? d.finalizeSession())
+            }
+            diarPending = []
             diarizer = nil
         }
         asrQueue.sync {
@@ -145,18 +150,21 @@ final class Recorder {
         }
     }
 
-    /// On diarQueue: feed system audio to the diarizer as it comes, with silence for the gaps.
+    /// On diarQueue: feed system audio to the diarizer, with silence for the gaps. It gets half a second at a time (its step) instead of
+    /// every ~20 ms buffer: the same turns for far fewer model calls.
     private func diarFeed(_ samples: [Float], _ at: Double) {
         guard let d = diarizer else { return }  // not loaded yet: those seconds get no speaker labels
-        if diarFed == 0 { diarStart = at }
-        let gap = Int((at - (diarStart + Double(diarFed) / 16000)) * 16000)
+        if diarFed == 0 && diarPending.isEmpty { diarStart = at }
+        let gap = Int((at - (diarStart + Double(diarFed + diarPending.count) / 16000)) * 16000)
         if gap > 16000 * 3 / 10 {
             let fill = min(gap, 16000 * 60 * 30)  // ponytail: at most 30 min of silence per gap; longer ones shift the labels a little
-            try? d.addAudio([Float](repeating: 0, count: fill), sourceSampleRate: 16000)
-            diarFed += fill
+            diarPending += [Float](repeating: 0, count: fill)
         }
-        try? d.addAudio(samples, sourceSampleRate: 16000)
-        diarFed += samples.count
+        diarPending += samples
+        guard diarPending.count >= 8000 else { return }
+        try? d.addAudio(diarPending, sourceSampleRate: 16000)
+        diarFed += diarPending.count
+        diarPending = []
         emit(try? d.process())
     }
 
