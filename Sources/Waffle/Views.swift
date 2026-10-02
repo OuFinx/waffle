@@ -206,19 +206,18 @@ struct NewFolder: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(parent == nil ? "New Folder" : "New Subfolder").font(.headline)
-            // Labels in one right-aligned column, every control the same full width: nothing shifts with a name's length.
-            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 10) {
-                GridRow {
-                    Button { emoji = randomFolderEmoji(avoiding: [emoji]) } label: {
-                        Text(emoji).font(.system(size: 20)).frame(width: 32, height: 32).background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain).help("Another emoji")
-                    .gridColumnAlignment(.trailing)
-                    TextField("Name", text: $name).textFieldStyle(.roundedBorder).onSubmit(create)
+            // The emoji and the name on their own row; below, one column of labels and one of menus, all left-aligned at the same width.
+            HStack(spacing: 10) {
+                Button { emoji = randomFolderEmoji(avoiding: [emoji]) } label: {
+                    Text(emoji).font(.system(size: 20)).frame(width: 32, height: 32).background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
                 }
+                .buttonStyle(.plain).help("Another emoji")
+                TextField("Name", text: $name).textFieldStyle(.roundedBorder).onSubmit(create)
+            }
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 10) {
                 if !model.folders.isEmpty {
                     GridRow {
-                        Text("Inside")
+                        Text("Inside").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
                         Picker("Inside", selection: $parent) {
                             Text("Top level").tag(String?.none)
                             Divider()
@@ -226,24 +225,24 @@ struct NewFolder: View {
                                 Text(String(repeating: "    ", count: folderDepth(f.name)) + "\(model.folderEmoji[f.name] ?? "📁") \(folderLeaf(f.name))").tag(Optional(f.name))
                             }
                         }
-                        .labelsHidden().frame(maxWidth: .infinity)
+                        .labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 GridRow {
-                    Text("Reports for")
+                    Text("Reports for").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
                     Picker("Reports for", selection: $period) {
                         ForEach(ReportPeriod.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
-                    .labelsHidden().frame(maxWidth: .infinity)
+                    .labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
                 }
                 GridRow {
-                    Text("Template")
+                    Text("Template").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
                     Picker("Template", selection: $template) {
                         Text("\(model.library.defaultTemplate.label) \u{2605}").tag(String?.none)
                         Divider()
                         ForEach(model.library.all) { t in Text(t.label).tag(Optional(t.id)) }
                     }
-                    .labelsHidden().frame(maxWidth: .infinity)
+                    .labelsHidden().frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             if taken { Text("There is already a folder with this name here.").font(.caption).foregroundStyle(.red) }
