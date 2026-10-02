@@ -1,0 +1,24 @@
+# Builds the app and runs the self-check on every push and pull request.
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode
+        # The toolbar code needs the macOS 26 SDK: use the newest Xcode 26 on the runner.
+        run: |
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XC" ]; then sudo xcode-select -s "$XC"; fi
+          xcodebuild -version
+      - name: Self-check
+        run: ./build.sh test
+      - name: Speech library
+        run: brew install whisper-cpp
+      - name: Build
+        run: swift build -c release --product Waffle
