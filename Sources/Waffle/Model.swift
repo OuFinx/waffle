@@ -41,7 +41,7 @@ struct Page: Equatable { var scope: Scope; var selected: String?; var report: Op
 struct QA: Identifiable, Hashable { let id = UUID(); var q: String; var a: String?; var failed = false }
 
 let silenceEnd: TimeInterval = 180  // no speech for this long ends the meeting
-let micReleaseEnd: TimeInterval = 10  // the call apps released the microphone this long ago
+let micReleaseEnd: TimeInterval = 6  // the call apps released the microphone this long ago
 let resumeWithin: TimeInterval = 3600  // an interrupted meeting can be continued from the call prompt for this long
 
 /// A warning alert with a destructive button and Cancel (Esc). True when the destructive button was clicked.
@@ -130,6 +130,8 @@ final class Model: ObservableObject {
     }
 
     var busy: Bool { [.recording, .finalizing, .summarizing].contains(status) }
+    /// Still recording, but the call apps let go of the microphone: the call is over and the recording stops in a few seconds.
+    @Published var callEnding = false
     var openMain: (() -> Void)?  // set by a SwiftUI view that has openWindow
 
     private var part = 0
@@ -288,7 +290,7 @@ final class Model: ObservableObject {
     private func begin() {
         guard let id = activeId else { return }
         part += 1
-        lastSpeech = nil; micSeen = false; micEmptySince = nil
+        lastSpeech = nil; micSeen = false; micEmptySince = nil; callEnding = false
         Store.updateMeta(id, ["recording": true])  // stays set if the app dies mid-meeting, see interrupted()
         status = .recording; detail = ""; hearing = []; micMuted = false; turns = []
         let rec = Recorder()
@@ -338,6 +340,7 @@ final class Model: ObservableObject {
     func stop(_ reason: String = "stopped") {
         guard status == .recording, let id = activeId, let rec = recorder else { return }
         status = .finalizing
+        callEnding = false
         detail = "\(reason): finishing the last sentences"
         rec.stop { [self] in  // the recorder finalises its last windows first
             recorder = nil
@@ -391,6 +394,7 @@ final class Model: ObservableObject {
         let apps = callApps()
         guard status == .recording else { return apps }
         if !apps.isEmpty { micSeen = true; micEmptySince = nil } else if micSeen && micEmptySince == nil { micEmptySince = Date() }
+        if callEnding != (micEmptySince != nil) { callEnding = micEmptySince != nil }
         if let t = micEmptySince, Date().timeIntervalSince(t) > micReleaseEnd { stop("the call ended") }
         else if let t = lastSpeech, Date().timeIntervalSince(t) > silenceEnd { stop("long silence") }
         return apps

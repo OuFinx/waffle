@@ -43,7 +43,6 @@ final class TabView: NSView {
             bars.append(bar)
         }
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.cursorUpdate, .activeAlways, .inVisibleRect], owner: self))
-        toolTip = "Waffle is recording. Click to see the live transcript, drag to move."
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -61,22 +60,33 @@ final class TabView: NSView {
         }
     }
 
-    /// Bars bounce while recording, rest grey while the notes are written.
-    func setRecording(_ on: Bool) {
-        let colour = on ? NSColor(srgbRed: 1, green: 0.38, blue: 0.33, alpha: 1) : NSColor.white.withAlphaComponent(0.35)  // the capsule is always dark
+    private var ending: Bool?
+
+    /// Recording: red bars bounce like a level meter. Ending (the call is over, the recording stops in a moment): amber bars at rest
+    /// light up one after another, like a loading indicator, so it no longer looks like recording.
+    func setEnding(_ on: Bool) {
+        guard on != ending else { return }
+        ending = on
+        toolTip = on ? "The call ended. Waffle is finishing the recording." : "Waffle is recording. Click to see the live transcript, drag to move."
+        let colour = on ? NSColor(srgbRed: 1, green: 0.72, blue: 0.25, alpha: 1) : NSColor(srgbRed: 1, green: 0.38, blue: 0.33, alpha: 1)  // the capsule is always dark
         for (i, bar) in bars.enumerated() {
+            bar.removeAllAnimations()
             bar.backgroundColor = colour.cgColor
-            if on && bar.animation(forKey: "level") == nil {
-                let a = CABasicAnimation(keyPath: "transform.scale.x")
+            let a: CABasicAnimation
+            if on {
+                a = CABasicAnimation(keyPath: "opacity")
+                a.fromValue = 0.2; a.toValue = 1
+                a.duration = 0.5
+                a.beginTime = CACurrentMediaTime() + Double(bars.count - 1 - i) * 0.12  // top to bottom
+            } else {
+                a = CABasicAnimation(keyPath: "transform.scale.x")
                 a.fromValue = 0.33; a.toValue = 1
                 a.duration = [0.45, 0.62, 0.52, 0.58, 0.48][i]
-                a.autoreverses = true; a.repeatCount = .infinity
-                a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 a.beginTime = CACurrentMediaTime() + [0, 0.18, 0.09, 0.27, 0.13][i]
-                bar.add(a, forKey: "level")
-            } else if !on {
-                bar.removeAnimation(forKey: "level")
             }
+            a.autoreverses = true; a.repeatCount = .infinity
+            a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            bar.add(a, forKey: "state")
         }
     }
 
@@ -119,7 +129,7 @@ final class RecordingTab: NSPanel {
         hasShadow = true
         contentView = body
         body.onMoved = { [unowned self] in self.snap() }
-        body.setRecording(true)
+        body.setEnding(false)
     }
 
     var screenFrame: NSRect { (screen ?? NSScreen.main ?? NSScreen.screens.first)!.visibleFrame }
@@ -215,7 +225,7 @@ final class Panels: NSObject {
                      NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, NSWindow.willCloseNotification] {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [unowned self] _ in DispatchQueue.main.async { self.update() } }
         }
-        model.$status.combineLatest(model.$activeId, model.$pinned).sink { [unowned self] _ in DispatchQueue.main.async { self.update() } }.store(in: &subs)
+        model.$status.combineLatest(model.$activeId, model.$pinned, model.$callEnding).sink { [unowned self] _ in DispatchQueue.main.async { self.update() } }.store(in: &subs)
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [unowned self] _ in updatePrompt(model.watch()) }
     }
 
@@ -227,6 +237,7 @@ final class Panels: NSObject {
             return
         }
         if miniFor != id { miniFor = id; if model.pinned { showMini() } }  // pinned: opens by itself when a recording starts
+        tab.body.setEnding(model.callEnding)
         let mainInFront = NSApp.isActive && !NSApp.isHidden && mainWindow?.isVisible == true && mainWindow?.isMiniaturized == false
         if !mini.isVisible && !mainInFront {
             if !tab.isVisible { tab.dock(); tab.orderFrontRegardless() }
@@ -339,12 +350,12 @@ struct MiniView: View {
 
     var header: some View {
         HStack(spacing: 8) {
-            Circle().fill(recording ? .red : .secondary).frame(width: 8, height: 8)
+            Circle().fill(recording ? (model.callEnding ? .orange : .red) : .secondary).frame(width: 8, height: 8)
                 .opacity(recording && pulse ? 0.35 : 1)
                 .animation(recording ? .easeInOut(duration: 0.9).repeatForever() : .default, value: pulse)
                 .onAppear { pulse = true }
             VStack(alignment: .leading, spacing: 0) {
-                Text(recording ? "Recording" : model.busy ? "Writing notes..." : "Done").font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text(recording ? (model.callEnding ? "Call ended, finishing..." : "Recording") : model.busy ? "Writing notes..." : "Done").font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 if recording, let id {
                     TimelineView(.periodic(from: .now, by: 1)) { _ in Text(elapsed(Int(Date().timeIntervalSince(meetingDate(id))))).font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary) }
                 }

@@ -489,7 +489,7 @@ struct MeetingRowView: View {
                 HStack(spacing: 4) {
                     Text((showDay ? "\(shortDay(d)), " : "") + hm(d) + (mins > 0 ? " · \(mins) min" : "")).monospacedDigit()
                     if model.activeId == id && model.status == .recording {
-                        Text("·"); Circle().fill(.red).frame(width: 6, height: 6); Text("Recording")
+                        Text("·"); Circle().fill(model.callEnding ? .orange : .red).frame(width: 6, height: 6); Text(model.callEnding ? "Finishing" : "Recording")
                     } else if model.activeId == id && model.busy {
                         Text("· Writing summary")
                     }
@@ -1047,7 +1047,8 @@ struct MeetingActions: View {
             switch status {
             case .recording:
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    StatusPill(elapsed(Int(Date().timeIntervalSince(meetingDate(id))))) { Circle().fill(.red).frame(width: 7, height: 7) }.help("Recording")
+                    StatusPill(elapsed(Int(Date().timeIntervalSince(meetingDate(id))))) { Circle().fill(model.callEnding ? .orange : .red).frame(width: 7, height: 7) }
+                        .help(model.callEnding ? "The call ended: Waffle stops recording in a few seconds" : "Recording")
                 }
                 MicButton()
                 Button { model.endMeeting() } label: { Label("End", systemImage: "stop.fill") }
