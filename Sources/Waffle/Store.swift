@@ -148,6 +148,18 @@ enum Store {
         for r in allReports() where isIn([r.folder], folder) { deleteReport(r.id) }
     }
 
+    /// A folder and its subfolders under a new name in folders.json and in their reports.
+    static func renameFolder(_ old: String, to new: String) {
+        lock.lock()
+        var m: [String: [String: String]] = [:]
+        for (k, v) in folderMeta { m[renamedFolder(k, from: old, to: new), default: [:]].merge(v) { $1 } }
+        writeJSON(m, dataDir.appendingPathComponent("folders.json"))
+        lock.unlock()
+        for r in allReports() where isIn([r.folder], old) {
+            addReport(Report(id: r.id, folder: renamedFolder(r.folder, from: old, to: new), title: r.title, text: r.text))
+        }
+    }
+
     // MARK: reports/<id>.json: every report written for a folder, id = when it was written
 
     private static var reportsDir: URL { dataDir.appendingPathComponent("reports") }

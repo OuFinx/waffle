@@ -199,6 +199,27 @@ final class Model: ObservableObject {
         reload()
     }
 
+    /// A new name for a folder, in the same place. Its subfolders, meetings, emoji, template and reports go along.
+    func renameFolder(_ folder: String, to name: String) {
+        let leaf = name.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "/", with: "-")
+        let new = folder.lastIndex(of: "/").map { "\(folder[..<$0])/\(leaf)" } ?? leaf
+        guard !leaf.isEmpty else { return fail("A folder needs a name") }
+        guard new != folder else { return }
+        guard !folderExists(new) || new.lowercased() == folder.lowercased() else { return fail("There is already a folder \u{201C}\(folderPath(new))\u{201D}") }
+        guard !writingUpdate.contains(where: { isIn([$0], folder) }) else { return fail("Not now: a report for this folder is being written") }
+        for id in Store.ids() where isIn(Store.tags(id), folder) { Store.setTags(id, Store.tags(id).map { renamedFolder($0, from: folder, to: new) }) }
+        Store.renameFolder(folder, to: new)
+        var lib = Store.library
+        lib.folders = Dictionary(lib.folders.map { (renamedFolder($0.key, from: folder, to: new), $0.value) }) { a, _ in a }
+        Store.saveLibrary(lib)
+        threads = Dictionary(threads.map { k, v in (k.hasPrefix("f:") ? "f:" + renamedFolder(String(k.dropFirst(2)), from: folder, to: new) : k, v) }) { a, _ in a }
+        let report = openReport
+        if let f = folderSettings, isIn([f], folder) { folderSettings = nil }
+        if case let .folder(f) = scope, isIn([f], folder) { replacePage { scope = .folder(renamedFolder(f, from: folder, to: new)) } }
+        if let r = report, isIn([r.folder], folder) { replacePage { openReport = OpenReport(folder: renamedFolder(r.folder, from: folder, to: new), id: r.id) } }
+        reload()
+    }
+
     /// Asks first, then takes the folder and its subfolders away. Their meetings stay: in their other folders, else in No Folder.
     /// The folders' reports go to the Trash.
     func deleteFolder(_ folder: String) {

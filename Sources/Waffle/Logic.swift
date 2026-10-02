@@ -461,6 +461,11 @@ func treeGuides(_ f: String, in tree: [String]) -> [Bool] {
     return parts.count < 2 ? [] : (2...parts.count).map { hasLater(parts[..<$0].joined(separator: "/")) }
 }
 
+/// A folder path after `old` is renamed to `new`: `old` itself and its subfolders change, anything else stays.
+func renamedFolder(_ f: String, from old: String, to new: String) -> String {
+    f == old ? new : f.hasPrefix(old + "/") ? new + f.dropFirst(old.count) : f
+}
+
 /// A meeting with these folders is in `folder` if it is in it or in one of its subfolders.
 func isIn(_ tags: [String], _ folder: String) -> Bool { tags.contains { $0 == folder || $0.hasPrefix(folder + "/") } }
 

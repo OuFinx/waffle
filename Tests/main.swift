@@ -82,6 +82,11 @@ assert(isIn(["Project/Standups"], "Project") && isIn(["Project"], "Project") && 
 assert(folderTree(["Project/Standups", "Alpha", "project x"]) == ["Alpha", "Project", "Project/Standups", "project x"], "\(folderTree(["Project/Standups", "Alpha", "project x"]))")
 assert(folderLeaf("Project/Standups") == "Standups" && folderDepth("Project/Standups") == 1 && folderPath("A/B") == "A \u{203A} B")
 
+// renaming a folder takes its subfolders along and leaves look-alike names alone
+assert(renamedFolder("Project", from: "Project", to: "Work") == "Work" && renamedFolder("Project/Standups", from: "Project", to: "Work") == "Work/Standups")
+assert(renamedFolder("Projects", from: "Project", to: "Work") == "Projects" && renamedFolder("A/Project", from: "Project", to: "Work") == "A/Project")
+assert(renamedFolder("A/B/C", from: "A/B", to: "A/X") == "A/X/C")
+
 let tree = folderTree(["A/x", "A/y/1", "A/y/2", "B"])  // A ├x └y ├1 └2, B
 assert(treeGuides("A", in: tree) == [] && treeGuides("A/x", in: tree) == [true] && treeGuides("A/y", in: tree) == [false])
 assert(treeGuides("A/y/1", in: tree) == [false, true] && treeGuides("A/y/2", in: tree) == [false, false])
