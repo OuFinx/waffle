@@ -41,15 +41,17 @@ final class ScreenNames {
     private func look() async -> ScreenLook? {
         let pids = NSWorkspace.shared.runningApplications.filter { Self.apps.contains($0.bundleIdentifier ?? "") }.map(\.processIdentifier)
         guard !pids.isEmpty else { return nil }
-        var texts: [String] = []
+        var texts: [String] = [], framed: [String] = []
         if AXIsProcessTrusted() { for pid in pids { texts += labels(pid) } }
-        // No one shown as talking in the labels (or no access to them): read the window's text, every 9 s at most.
+        // No one shown as talking in the labels (or no access to them): read the window, every 9 s at most. The app shows who talks
+        // by a coloured frame, which only the screenshot has.
         let now = Date().timeIntervalSince1970
         if speakingNames(texts).isEmpty && now - lastRead >= 9 {
             lastRead = now
-            for pid in pids { texts += await windowText(pid) }
+            for pid in pids { let r = await windowText(pid); texts += r.texts; framed += r.framed }
         }
-        let look = ScreenLook(t: Int(now * 1000), people: rosterNames(texts), talking: speakingNames(texts))
+        let talking = speakingNames(texts) + framed.filter { !speakingNames(texts).contains($0) }
+        let look = ScreenLook(t: Int(now * 1000), people: rosterNames(texts), talking: talking)
         return look.people.isEmpty && look.talking.isEmpty ? nil : look
     }
 
@@ -77,23 +79,50 @@ final class ScreenNames {
         return out
     }
 
-    /// Text recognised in a screenshot of the app's biggest window on screen.
-    private func windowText(_ pid: pid_t) async -> [String] {
+    /// Text recognised in a screenshot of the app's biggest window on screen, and the names framed as talking.
+    private func windowText(_ pid: pid_t) async -> (texts: [String], framed: [String]) {
         guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true),
               let w = content.windows.filter({ $0.owningApplication?.processID == pid && $0.frame.width >= 300 && $0.frame.height >= 200 })
                 .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
-        else { return [] }
+        else { return ([], []) }
         let cfg = SCStreamConfiguration()
         let scale = min(2, 1800 / w.frame.width)  // big enough for name labels, small enough to read fast
         cfg.width = Int(w.frame.width * scale); cfg.height = Int(w.frame.height * scale)
         cfg.showsCursor = false
-        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg) else { return [] }
+        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg) else { return ([], []) }
+        return Self.read(image)
+    }
+
+    /// The text in a screenshot of a call window, and the names in it the app highlights as talking (see framedNames).
+    static func read(_ image: CGImage) -> (texts: [String], framed: [String]) {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false  // names are not dictionary words
         request.automaticallyDetectsLanguage = true
         try? VNImageRequestHandler(cgImage: image).perform([request])
-        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        var texts: [String] = [], names: [(name: String, x: Int, y: Int, w: Int, h: Int)] = []
+        let w = Double(image.width), h = Double(image.height)
+        for o in request.results ?? [] {
+            guard let c = o.topCandidates(1).first else { continue }
+            texts.append(c.string)
+            guard let name = personName(c.string, minWords: 1), name.count >= 3 else { continue }
+            // the box of the name alone, without "(Host)" or a mic icon read as a letter
+            let b = (try? c.boundingBox(for: c.string.range(of: name) ?? c.string.startIndex..<c.string.endIndex))??.boundingBox ?? o.boundingBox
+            names.append((name, Int(b.minX * w), Int((1 - b.maxY) * h), Int(b.width * w), Int(b.height * h)))
+        }
+        guard !names.isEmpty, let px = pixels(image) else { return (texts, []) }
+        return (texts, framedNames(px, names))
+    }
+
+    private static func pixels(_ image: CGImage) -> Pixels? {
+        var px = Pixels(w: image.width, h: image.height, rgba: [UInt8](repeating: 0, count: image.width * image.height * 4))
+        let ok = px.rgba.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(data: buf.baseAddress, width: px.w, height: px.h, bitsPerComponent: 8, bytesPerRow: px.w * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: px.w, height: px.h))
+            return true
+        }
+        return ok ? px : nil
     }
 }
 
