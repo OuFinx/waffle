@@ -140,15 +140,24 @@ enum Store {
     }
     static func setFolderEmoji(_ folder: String, _ emoji: String) { setFolderField(folder, "emoji", emoji) }
 
+    /// A folder and its subfolders out of folders.json, and their reports to the Trash.
+    static func removeFolder(_ folder: String) {
+        lock.lock()
+        writeJSON(folderMeta.filter { !isIn([$0.key], folder) }, dataDir.appendingPathComponent("folders.json"))
+        lock.unlock()
+        for r in allReports() where isIn([r.folder], folder) { deleteReport(r.id) }
+    }
+
     // MARK: reports/<id>.json: every report written for a folder, id = when it was written
 
     private static var reportsDir: URL { dataDir.appendingPathComponent("reports") }
 
     /// A folder's reports, newest first.
-    static func reports(_ folder: String) -> [Report] {
+    static func reports(_ folder: String) -> [Report] { allReports().filter { $0.folder == folder } }
+    /// Every report, newest first.
+    static func allReports() -> [Report] {
         ((try? fm.contentsOfDirectory(atPath: reportsDir.path)) ?? []).filter { $0.hasSuffix(".json") }.sorted(by: >)
             .compactMap { try? JSONDecoder().decode(Report.self, from: Data(contentsOf: reportsDir.appendingPathComponent($0))) }
-            .filter { $0.folder == folder }
     }
     static func report(_ id: String) -> Report? { try? JSONDecoder().decode(Report.self, from: Data(contentsOf: reportsDir.appendingPathComponent("\(id).json"))) }
     @discardableResult static func addReport(_ r: Report) -> Bool {

@@ -90,6 +90,7 @@ final class Model: ObservableObject {
     func back() {
         while let p = history.popLast() {
             if let id = p.selected, !meetings.contains(where: { $0.id == id }) { continue }  // deleted since
+            if case let .folder(f) = p.scope, !folders.contains(where: { $0.name == f }) { continue }  // deleted or renamed since
             replacePage { scope = p.scope; selected = p.selected; openReport = p.report; settingsOpen = p.settings }
             return
         }
@@ -195,6 +196,27 @@ final class Model: ObservableObject {
 
     func setFolderEmoji(_ folder: String, _ emoji: String) {
         Store.setFolderEmoji(folder, emoji)
+        reload()
+    }
+
+    /// Asks first, then takes the folder and its subfolders away. Their meetings stay: in their other folders, else in No Folder.
+    /// The folders' reports go to the Trash.
+    func deleteFolder(_ folder: String) {
+        guard !writingUpdate.contains(where: { isIn([$0], folder) }) else { return fail("Not now: a report for this folder is being written") }
+        let n = meetings.filter { isIn($0.tags, folder) }.count, subs = folders.filter { isIn([$0.name], folder) }.count - 1
+        let what = (subs > 0 ? "Its \(subs) subfolder\(subs == 1 ? "" : "s") go\(subs == 1 ? "es" : "") too. " : "")
+            + (n > 0 ? "The \(n) meeting\(n == 1 ? "" : "s") in it stay\(n == 1 ? "s" : ""), in No Folder or in their other folders. " : "")
+            + "Its reports are moved to the Trash."
+        guard confirm("Delete the folder \u{201C}\(folderPath(folder))\u{201D}?", what, "Delete Folder") else { return }
+        for id in Store.ids() where isIn(Store.tags(id), folder) { Store.setTags(id, Store.tags(id).filter { !isIn([$0], folder) }) }
+        Store.removeFolder(folder)
+        var lib = Store.library
+        lib.folders = lib.folders.filter { !isIn([$0.key], folder) }
+        Store.saveLibrary(lib)
+        threads = threads.filter { !($0.key.hasPrefix("f:") && isIn([String($0.key.dropFirst(2))], folder)) }
+        if let f = folderSettings, isIn([f], folder) { folderSettings = nil }
+        if let r = openReport, isIn([r.folder], folder) { openReport = nil }
+        if case let .folder(f) = scope, isIn([f], folder) { scope = .all; selected = nil }
         reload()
     }
 
