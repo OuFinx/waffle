@@ -898,6 +898,7 @@ enum Tab: String, CaseIterable { case transcript = "Transcript", notes = "Notes"
 
 struct MeetingView: View {
     @EnvironmentObject var model: Model
+    @ObservedObject var live = Model.shared.live
     let id: String
     @State var tab = Tab.summary
     @State var summary: String?
@@ -910,7 +911,7 @@ struct MeetingView: View {
 
     var active: Bool { model.activeId == id }
     var status: Status { active ? model.status : .done }
-    var lines: [Line] { active ? model.lines : diskLines }
+    var lines: [Line] { active ? live.lines : diskLines }
     var tags: [String] { model.meetings.first { $0.id == id }?.tags ?? [] }
 
     var body: some View {
@@ -950,7 +951,7 @@ struct MeetingView: View {
                 : [.finalizing, .summarizing].contains(status) ? Placeholder(symbol: "", title: "Writing the summary", text: "The AI is turning the transcript and your notes into the summary. This takes about a minute.", busy: true)
                 : lines.isEmpty ? Placeholder(symbol: "waveform.slash", title: "Nothing to summarise", text: "Nothing was transcribed in this meeting.")
                 : Placeholder(symbol: "doc.text", title: "No summary yet", text: "Make one with Make Summary above."))
-            case .transcript: TranscriptView(lines: lines, typing: active && status == .recording ? model.hearing : [], empty: status == .recording ? Placeholder(symbol: "waveform", title: "Listening", text: "Text appears here a few seconds after people speak.") : Placeholder(symbol: "waveform.slash", title: "No transcript", text: "Nothing was transcribed in this meeting."), names: speakerNames(lines, names: speakerMeta),
+            case .transcript: TranscriptView(lines: lines, typing: active && status == .recording ? live.hearing : [], empty: status == .recording ? Placeholder(symbol: "waveform", title: "Listening", text: "Text appears here a few seconds after people speak.") : Placeholder(symbol: "waveform.slash", title: "No transcript", text: "Nothing was transcribed in this meeting."), names: speakerNames(lines, names: speakerMeta),
                                                 delete: { model.confirmDeleteLine(id, $0) }, rename: { model.nameSpeaker(id, $0, $1) })
             case .notes:
                 TextEditor(text: $notes).font(.body).scrollContentBackground(.hidden)
@@ -1342,7 +1343,7 @@ struct RenameSpeaker: View {
 
 struct TypingDots: View {
     var body: some View {
-        TimelineView(.animation) { ctx in
+        TimelineView(.animation(minimumInterval: 1.0 / 20)) { ctx in  // 20 fps is plenty for three dots and far cheaper than the display's rate
             let t = ctx.date.timeIntervalSinceReferenceDate
             HStack(spacing: 3) {
                 ForEach(0..<3) { i in Circle().frame(width: 5, height: 5).opacity(0.3 + 0.7 * max(0, sin((t * 2 - Double(i) * 0.25) * .pi))) }

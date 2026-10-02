@@ -27,6 +27,17 @@ lines = replaceWindow(lines, src: "sys", w: 1000, part: 1, final: false, segment
 lines = replaceWindow(lines, src: "sys", w: 1000, part: 1, final: false, segments: [(0, 2, " Hello world. Next one")])
 assert(lines.map(\.text) == ["Hi.", "Hello world.", "Next one"], "\(lines)")
 
+// passes over a long transcript only re-check the lines near the new ones, and end up the same as checking everything
+var long: [Line] = [], full: [Line] = []
+for k in 0..<120 {
+    let w = k * 7000, src = k % 3 == 0 ? "mic" : "sys"
+    let text = k % 9 == 0 ? "We ship the release on Monday at ten." : "Line number \(k) about topic \(k % 5)."
+    long = replaceWindow(long, src: src, w: w, part: 1, final: true, segments: [(0, 2, text)])
+    full = dropEcho((full + [Line(t: w, src: src, text: text, part: 1, final: true, w: w)]).sorted { $0.t < $1.t })
+}
+assert(long == full && long.count < 120, "\(long.count) \(full.count)")
+assert(firstIndex(5) { $0 >= 3 } == 3 && firstIndex(5) { _ in false } == 5 && firstIndex(0) { _ in true } == 0)
+
 // a summary prompt is the fixed rules, the template, then the fixed title / folders / speakers layout
 let haiku = Template(id: "x", name: "Haiku", text: "Write haiku.")
 assert(summarySystem(template: haiku).hasPrefix("You turn a meeting") && summarySystem(template: haiku).contains("Write haiku.") && summarySystem(template: haiku).hasSuffix("call people by those names."))
@@ -58,6 +69,9 @@ let talk = [Line(t: 0, src: "sys", text: "Hi.", part: 1, final: true, w: 0), Lin
 let turns = [Turn(start: 0, end: 4800, spk: "1-1"), Turn(start: 4800, end: 5200, spk: "1-1"), Turn(start: 5200, end: 9000, spk: "1-2")]
 let labelled = labelSpeakers(talk, turns)
 assert(labelled.map(\.spk) == ["1-1", nil, "1-2", nil], "\(labelled.map(\.spk))")
+// the same with turns out of order, and with a long turn that started well before the line
+assert(labelSpeakers(talk, turns.reversed()).map(\.spk) == labelled.map(\.spk))
+assert(labelSpeakers(talk, [Turn(start: -50000, end: 1000, spk: "1-3"), Turn(start: 5500, end: 6000, spk: "1-1")]).map(\.spk) == ["1-3", nil, "1-1", nil])
 let names = speakerNames(labelled, names: ["1-2": "Oleg"])
 assert(names == ["1-1": "Speaker 1", "1-2": "Oleg"] && labelled.map { label($0, names) } == ["Speaker 1", "Me", "Oleg", "Them"])
 assert(speakerNames(Array(labelled.prefix(2)), names: [:]) == ["1-1": "Them"])  // one voice only: plain "Them"

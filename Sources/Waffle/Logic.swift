@@ -17,17 +17,33 @@ struct Turn: Equatable { var start: Int; var end: Int; var spk: String }
 
 /// Who said each "Them" line: the diarized voice that overlaps it most. A line is taken to last until the next "Them" line starts
 /// (at most 10 s; the last one 4 s). Lines no turn covers keep what they had.
+/// It runs on every recognition pass of a long meeting, so each line only looks at the turns near it (turns sorted by start).
 func labelSpeakers(_ lines: [Line], _ turns: [Turn]) -> [Line] {
     guard !turns.isEmpty else { return lines }
+    let turns = zip(turns, turns.dropFirst()).allSatisfy { $0.start <= $1.start } ? turns : turns.sorted { $0.start < $1.start }
+    let longest = turns.map { $0.end - $0.start }.max() ?? 0
     let sys = lines.indices.filter { lines[$0].src == "sys" }
     var out = lines
     for (k, i) in sys.enumerated() {
         let s = lines[i].t, e = k + 1 < sys.count ? max(min(lines[sys[k + 1]].t, s + 10000), s + 500) : s + 4000
         var overlap: [String: Int] = [:]
-        for t in turns where t.end > s && t.start < e { overlap[t.spk, default: 0] += min(t.end, e) - max(t.start, s) }
+        // Turns that start before s - longest also end before s: skip them all with a binary search.
+        var j = firstIndex(turns.count) { turns[$0].start >= s - longest }
+        while j < turns.count, turns[j].start < e {
+            let t = turns[j]
+            if t.end > s { overlap[t.spk, default: 0] += min(t.end, e) - max(t.start, s) }
+            j += 1
+        }
         if let top = overlap.max(by: { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) }) { out[i].spk = top.key }
     }
     return out
+}
+
+/// The first index in 0..<count where `ok` holds, for an `ok` that is false and then true; count if it never holds.
+func firstIndex(_ count: Int, where ok: (Int) -> Bool) -> Int {
+    var lo = 0, hi = count
+    while lo < hi { let mid = (lo + hi) / 2; if ok(mid) { hi = mid } else { lo = mid + 1 } }
+    return lo
 }
 
 /// What each voice of "Them" is called: the name the user gave it, else "Speaker N" in order of first appearance. A single unnamed
@@ -89,9 +105,14 @@ func dropEcho(_ lines: [Line], windowMs: Int = 30000) -> [Line] {
 }
 
 /// A new recognition pass over one speaker's window: its lines replace the ones from the previous pass of the same window.
-func replaceWindow(_ lines: [Line], src: String, w: Int, part: Int, final: Bool, segments: [Segment]) -> [Line] {
+func replaceWindow(_ lines: [Line], src: String, w: Int, part: Int, final: Bool, segments: [Segment], echoMs: Int = 30000) -> [Line] {
     let fresh = splitSentences(segments).map { Line(t: w + $0.0, src: src, text: $0.1, part: part, final: final, w: w) }
-    return dropEcho((lines.filter { !($0.w == w && $0.src == src) } + fresh).sorted { $0.t < $1.t })
+    let all = (lines.filter { !($0.w == w && $0.src == src) } + fresh).sorted { $0.t < $1.t }
+    // Every pass so far left the transcript free of echoes, so only lines near the new ones can be echoes now: a "Me" line within
+    // echoMs of a new line, checked against "Them" lines within echoMs of it. The rest of a long meeting is not looked at again.
+    guard let from = fresh.map(\.t).min() else { return all }
+    let cut = firstIndex(all.count) { all[$0].t >= from - 2 * echoMs }
+    return Array(all[..<cut]) + dropEcho(Array(all[cut...]), windowMs: echoMs)
 }
 
 /// Sentences of one recognition pass over recognizer tokens: text, index after its last token, end time, and when the next token starts.

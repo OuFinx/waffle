@@ -310,6 +310,7 @@ final class Panels: NSObject {
 /// Me right in blue, the same as the meeting page), and a note field at the bottom like a message composer.
 struct MiniView: View {
     @EnvironmentObject var model: Model
+    @ObservedObject var live = Model.shared.live
     @Environment(\.colorScheme) var scheme
     @State var notes = ""
     @State var savedNotes = ""
@@ -391,9 +392,9 @@ struct MiniView: View {
 
     /// A speaker label only where the speaker changes; typing dots at the end for whoever is talking right now.
     var bubbles: some View {
-        let typing = recording ? ["sys", "mic"].filter(model.hearing.contains) : []
-        let names = id.map { speakerNames(model.lines, names: Store.speakers($0)) } ?? [:]
-        let items: [(String, String, Bool, Line?)] = model.lines.map { (label($0, names), $0.text, $0.final, $0) } + typing.map { ($0 == "mic" ? "Me" : "Them", "", true, nil) }
+        let typing = recording ? ["sys", "mic"].filter(live.hearing.contains) : []
+        let names = speakerNames(live.lines, names: live.names)
+        let items: [(String, String, Bool, Line?)] = live.lines.map { (label($0, names), $0.text, $0.final, $0) } + typing.map { ($0 == "mic" ? "Me" : "Them", "", true, nil) }
         return ScrollView {
             LazyVStack(spacing: 4) {
                 if items.isEmpty { Text("Listening. Text appears here a few seconds after people speak.").foregroundStyle(.secondary).padding(.top, 20) }
