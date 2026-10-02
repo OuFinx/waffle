@@ -85,7 +85,7 @@ struct SetupView: View {
     }
 
     var systemAudio: some View {
-        SetupPage(title: "Allow system audio", text: "So Waffle hears the other people in the call. macOS calls this Screen & System Audio Recording: Waffle takes only the sound, never the screen.") {
+        SetupPage(title: "Allow system audio", text: "So Waffle hears the other people in the call. macOS calls this Screen & System Audio Recording: Waffle records only the sound, and reads just the names in a Zoom or Teams window.") {
             HeroIcon(symbol: "speaker.wave.2.fill", colors: [.teal, .blue])
         } content: {
             VStack(alignment: .leading, spacing: 10) {

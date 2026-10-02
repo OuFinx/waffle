@@ -912,6 +912,8 @@ struct MeetingView: View {
     var active: Bool { model.activeId == id }
     var status: Status { active ? model.status : .done }
     var lines: [Line] { active ? live.lines : diskLines }
+    /// Names of the voices: while recording also the ones the call window settled.
+    var names: [String: String] { active ? live.names : speakerMeta }
     var tags: [String] { model.meetings.first { $0.id == id }?.tags ?? [] }
 
     var body: some View {
@@ -951,7 +953,7 @@ struct MeetingView: View {
                 : [.finalizing, .summarizing].contains(status) ? Placeholder(symbol: "", title: "Writing the summary", text: "The AI is turning the transcript and your notes into the summary. This takes about a minute.", busy: true)
                 : lines.isEmpty ? Placeholder(symbol: "waveform.slash", title: "Nothing to summarise", text: "Nothing was transcribed in this meeting.")
                 : Placeholder(symbol: "doc.text", title: "No summary yet", text: "Make one with Make Summary above."))
-            case .transcript: TranscriptView(lines: lines, typing: active && status == .recording ? live.hearing : [], empty: status == .recording ? Placeholder(symbol: "waveform", title: "Listening", text: "Text appears here a few seconds after people speak.") : Placeholder(symbol: "waveform.slash", title: "No transcript", text: "Nothing was transcribed in this meeting."), names: speakerNames(lines, names: speakerMeta),
+            case .transcript: TranscriptView(lines: lines, typing: active && status == .recording ? live.hearing : [], empty: status == .recording ? Placeholder(symbol: "waveform", title: "Listening", text: "Text appears here a few seconds after people speak.") : Placeholder(symbol: "waveform.slash", title: "No transcript", text: "Nothing was transcribed in this meeting."), names: speakerNames(lines, names: names),
                                                 delete: { model.confirmDeleteLine(id, $0) }, rename: { model.nameSpeaker(id, $0, $1) })
             case .notes:
                 TextEditor(text: $notes).font(.body).scrollContentBackground(.hidden)
@@ -1004,7 +1006,7 @@ struct MeetingView: View {
 
     func copyTranscript() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(transcriptCopy(lines, names: speakerMeta), forType: .string)
+        NSPasteboard.general.setString(transcriptCopy(lines, names: names), forType: .string)
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
     }
@@ -1437,6 +1439,8 @@ struct SettingsView: View {
                 Text("Waffle uses the AI tool you already have and are signed in to, with your own plan. Only transcript text is sent, and only when a summary is made or you ask something. Audio never leaves this Mac.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+
+            ScreenNamesSettings()
 
             TemplatesSettings()
 

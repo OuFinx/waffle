@@ -204,10 +204,12 @@ enum Store {
         return "# Folders\nAlready in: \(mine.isEmpty ? "none" : mine.joined(separator: ", "))\nExisting folders:\n" + (rows.isEmpty ? "(none)" : rows.joined(separator: "\n"))
     }
 
-    /// Notes and transcript of a meeting, as Claude gets them.
-    static func context(_ id: String, lines: [Line]) -> String {
-        let notes = self.notes(id)
-        return "# My notes\n\(notes.isEmpty ? "(empty)" : notes)\n\n# Transcript\n\(lines.isEmpty ? "(empty)" : transcriptText(lines, names: speakers(id)))"
+    /// Notes, the people seen in the call window and the transcript of a meeting, as Claude gets them.
+    static func context(_ id: String, lines: [Line], names: [String: String]? = nil, people: [String]? = nil) -> String {
+        let notes = self.notes(id), people = Set(self.people(id)).union(people ?? []).sorted()
+        return "# My notes\n\(notes.isEmpty ? "(empty)" : notes)\n\n"
+            + (people.isEmpty ? "" : "# People seen in the call window\n\(people.joined(separator: ", "))\n\n")
+            + "# Transcript\n\(lines.isEmpty ? "(empty)" : transcriptText(lines, names: names ?? speakers(id)))"
     }
 
     /// Names the user gave to the voices of "Them": {"1-2": "Oleg"}.
@@ -218,6 +220,9 @@ enum Store {
         s[spk] = n.isEmpty ? nil : n
         updateMeta(id, ["speakers": s])
     }
+
+    /// The people the call window (Zoom, Teams) showed during the meeting, see ScreenNames.
+    static func people(_ id: String) -> [String] { meta(id)["people"] as? [String] ?? [] }
 
     /// Newest first: each meeting's summary (or the start of its transcript) and notes, up to the budget.
     static func askAllContext(folder: String?) -> String {
