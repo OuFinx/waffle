@@ -62,7 +62,7 @@ Then join a call: Waffle notices the call app taking the microphone and offers t
 **During the call**
 - **Live transcript** in English, Ukrainian and 23 other European languages, detected automatically, even mixed in one call.
 - **Who said what**: you are "Me"; the other side is split into voices you can name with a click. Waffle also fills in names that are clear from the conversation.
-- **Names from Zoom and Teams**: while a call records, Waffle reads who is in the call and who is talking from the Zoom or Teams window, and gives those names to the voices. It reads the app's accessibility labels when you allow Accessibility (Settings > Speaker names), else the text in the call window. Only the names are kept; nothing from the screen is stored or sent.
+- **Names from Zoom and Teams**: while a call records, Waffle reads who is in the call from the Zoom or Teams window, and who is talking from the coloured frame the app draws around that person's tile or avatar, and gives those names to the voices. It reads the app's accessibility labels when you allow Accessibility (Settings > Speaker names), else a screenshot of the call window. A name read wrong is fixed by clicking it in the transcript. Only the names are kept; nothing from the screen is stored or sent.
 - **Edge tab and popup**: a small tab at the screen edge shows live sound levels; click it for the transcript as a chat, with a notes field. Pin it to keep it open.
 - **Mute yourself in Waffle** when you mostly listen: your microphone stops being transcribed, the call still hears you.
 - **Stops by itself** when the call app releases the microphone or after a long silence.
@@ -109,7 +109,7 @@ One native SwiftUI app, no server and no web views.
 | `Sources/Waffle/AI.swift` | Summaries and answers through `claude -p` or `codex exec`, without tools, hooks or the user's own config |
 | `Sources/Waffle/Logic.swift` | Sentence locking, echo filter, speaker labels, prompts, templates, dates; checked by `Tests/main.swift` (`./build.sh test`) |
 | `Sources/Waffle/Store.swift` | Meetings, folders and reports as plain files |
-| `Sources/Waffle/ScreenNames.swift` | Names from the Zoom or Teams window (accessibility labels, or text recognition on that window) for the speaker labels |
+| `Sources/Waffle/ScreenNames.swift` | Names from the Zoom or Teams window (accessibility labels, or text recognition and the speaker frame on a screenshot of that window) for the speaker labels |
 | `Sources/Waffle/Model.swift` | Recording, auto stop, summaries, reports, chat, navigation |
 | `Sources/Waffle/Views.swift`, `Panels.swift`, `Setup.swift`, `App.swift` | Main window, edge tab and popup, first-run setup, menu bar |
 
