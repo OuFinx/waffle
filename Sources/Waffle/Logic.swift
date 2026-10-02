@@ -489,6 +489,7 @@ private let appWords: Set<String> = [
     "you", "your", "not", "no", "is", "are", "the", "this", "that", "and", "or", "of", "to", "in", "on", "talking", "speaking",
     "good", "morning", "afternoon", "evening", "hello", "hi", "thanks", "thank", "okay", "yes", "today", "tomorrow", "call", "calls",
     "home", "chats", "channel", "channels", "copilot", "phone", "contacts", "team", "general", "posts", "recap", "layout", "focus",
+    "fullscreen", "about", "details", "avatars", "avatar", "preview", "devices", "blur", "effects", "keep", "annotate", "apply", "pinned",
     // meeting titles, which the window and calendar labels show next to the people
     "sync", "review", "standup", "stand-up", "planning", "sprint", "weekly", "daily", "monthly", "demo", "retro", "retrospective",
     "product", "design", "project", "update", "updates", "kickoff", "workshop", "interview", "training", "office", "hours", "all-hands",
@@ -568,6 +569,109 @@ func labelFromScreen(_ lines: [Line], _ talking: [(t: Int, name: String)]) -> [L
         if near.count == 1 { out[i].spk = "@" + near.first! }
     }
     return out
+}
+
+/// A screenshot as RGBA bytes, rows from the top.
+struct Pixels {
+    var w: Int, h: Int, rgba: [UInt8]
+    func rgb(_ x: Int, _ y: Int) -> (Int, Int, Int) { let i = (y * w + x) * 4; return (Int(rgba[i]), Int(rgba[i + 1]), Int(rgba[i + 2])) }
+}
+
+/// Hue in degrees of an RGB colour, nil for a dull one (grey, dark, washed out).
+private func frameHue(_ c: (Int, Int, Int)) -> Double? {
+    let mx = max(c.0, c.1, c.2), mn = min(c.0, c.1, c.2), d = Double(mx - mn)
+    guard mx >= 110, mx - mn >= 40, d / Double(mx) >= 0.18 else { return nil }
+    let r = Double(c.0), g = Double(c.1), b = Double(c.2)
+    let h = mx == c.0 ? (g - b) / d : mx == c.1 ? 2 + (b - r) / d : 4 + (r - g) / d
+    let deg = (h * 60 + 360).truncatingRemainder(dividingBy: 360)
+    // The active-speaker colours only: Zoom green / yellow-green, Teams violet. Not red (annotations), not amber (Teams raised hand).
+    return (50...160).contains(deg) || (215...265).contains(deg) ? deg : nil
+}
+
+private func sameHue(_ a: Double, _ b: Double) -> Bool { let d = abs(a - b); return min(d, 360 - d) <= 25 }
+
+/// The names the call app draws its active-speaker highlight around: a thin border of one colour on all sides of the name's tile (the
+/// name in a corner of a video tile, or in the middle of a tile with the camera off), or a ring around the avatar just above the name
+/// (Teams, camera off). `names`: what text recognition read, with its box in pixels (top-left origin). More than two framed: none.
+func framedNames(_ img: Pixels, _ names: [(name: String, x: Int, y: Int, w: Int, h: Int)]) -> [String] {
+    guard img.w > 0, img.h > 0, img.rgba.count >= img.w * img.h * 4 else { return [] }
+    func inside(_ x: Int, _ y: Int) -> Bool { x >= 0 && y >= 0 && x < img.w && y < img.h }
+    /// Hue of a straight line of n pixels centred on (x, y), along (dx, dy), when 85% of it is one frame colour.
+    func line(_ x: Int, _ y: Int, _ n: Int, _ dx: Int, _ dy: Int) -> Double? {
+        guard inside(x - dx * n / 2, y - dy * n / 2), inside(x + dx * n / 2, y + dy * n / 2), let mid = frameHue(img.rgb(x, y)) else { return nil }
+        var ok = 0
+        for k in -n / 2...n / 2 { if let hh = frameHue(img.rgb(x + dx * k, y + dy * k)), sameHue(hh, mid) { ok += 1 } }
+        return ok * 100 >= (n + 1) * 85 ? mid : nil
+    }
+    /// Walking from (x, y) along (dx, dy): the hue of the first thin border across the way and how far it is, of the given hue when
+    /// there is one. Thin: a line across, gone 8 px further on and 5 px before (else it is the edge of a coloured area, like the violet
+    /// rooms of Teams avatars).
+    func border(_ x: Int, _ y: Int, _ dx: Int, _ dy: Int, _ n: Int, _ limit: Int, _ want: Double? = nil) -> (hue: Double, at: Int)? {
+        var (px, py) = (x, y)
+        for k in 1...max(1, limit) {
+            px += dx; py += dy
+            guard inside(px, py) else { return nil }
+            guard let here = frameHue(img.rgb(px, py)), want.map({ sameHue($0, here) }) ?? true else { continue }
+            guard let hh = line(px, py, n, dy, dx), want.map({ sameHue($0, hh) }) ?? true else { continue }
+            let gone = { (o: Int) in !(line(px + dx * o, py + dy * o, n, dy, dx).map { sameHue($0, hh) } ?? false) }
+            if gone(8) && gone(-5) { return (hh, k) }
+        }
+        return nil
+    }
+    func ringPoint(_ x: Double, _ y: Double, _ hue: Double) -> Bool {
+        for oy in -3...3 { for ox in -3...3 where inside(Int(x) + ox, Int(y) + oy) {
+            if let hh = frameHue(img.rgb(Int(x) + ox, Int(y) + oy)), sameHue(hh, hue) { return true }
+        } }
+        return false
+    }
+    var out: [String] = []
+    for n in names where n.w > 2 && n.h > 2 && !out.contains(n.name) {
+        let cx = n.x + n.w / 2, cy = n.y + n.h / 2, reach = max(img.w, img.h) / 2
+        // Text on a button of a frame colour is not a framed name: the name's own background must not be that colour.
+        var coloured = 0, all = 0
+        for y in stride(from: n.y, to: n.y + n.h, by: 2) { for x in stride(from: n.x, to: n.x + n.w, by: 2) where inside(x, y) { all += 1; if frameHue(img.rgb(x, y)) != nil { coloured += 1 } } }
+        guard coloured * 100 < all * 15 else { continue }
+        // Tile: a border on at least 3 sides (a menu or the window edge can hide one), all of one colour.
+        // The colour comes from the nearest side found (the one under a corner label), the others must be of that colour.
+        let across = max(16, min(n.w, 60)), along = max(10, min(n.h * 2, 40))
+        let rays = [(cx, n.y, 0, -1, across), (cx, n.y + n.h, 0, 1, across), (n.x, cy, -1, 0, along), (n.x + n.w, cy, 1, 0, along)]
+        // A tile is much bigger than its name; a frame tight around the text is a selected button.
+        if let hue = rays.compactMap({ border($0.0, $0.1, $0.2, $0.3, $0.4, reach) }).min(by: { $0.at < $1.at })?.hue {
+            let found = rays.compactMap { border($0.0, $0.1, $0.2, $0.3, $0.4, reach, hue)?.at }
+            if found.count >= 3, (found.max() ?? 0) >= max(30, n.h * 3) { out.append(n.name); continue }
+        }
+        // Avatar: the bottom of a ring a little above the name, its top a diameter higher, and the ring's sides; the avatar inside is not
+        // the ring colour (an avatar of initials on a coloured disc is not a ring).
+        var y = n.y - 1, bottom: Int?, hue = 0.0
+        while y > max(0, n.y - max(40, n.h * 4)), bottom == nil { if let hh = frameHue(img.rgb(cx, y)) { bottom = y; hue = hh }; y -= 1 }
+        guard let b = bottom else { continue }
+        y = b - 6
+        var top: Int?
+        while y > max(0, b - 400), top == nil { if let hh = frameHue(img.rgb(cx, y)), sameHue(hh, hue) { top = y }; y -= 1 }
+        guard let t = top, b - t >= max(24, n.h * 2) else { continue }
+        // The column through the name is a chord (the name can be off centre, "Lynne Robbins (External)"): its middle is the ring's
+        // middle row, where the ring's left and right give the centre and the radius.
+        let mid = (b + t) / 2
+        func side(_ dx: Int) -> Int? {
+            var x = cx + dx * 4
+            while inside(x, mid), abs(x - cx) < b - t {
+                if let hh = frameHue(img.rgb(x, mid)), sameHue(hh, hue) { return x }
+                x += dx
+            }
+            return nil
+        }
+        guard let xl = side(-1), let xr = side(1), xr - xl >= max(24, n.h * 2) else { continue }
+        let r = Double(xr - xl) / 2, ox = Double(xl + xr) / 2, gap = max(5, r * 0.18)
+        let angles = stride(from: 0.0, to: 2 * Double.pi, by: Double.pi / 4).map { (cos($0), sin($0)) }
+        func at(_ a: (Double, Double), _ rr: Double) -> (Double, Double) { (ox + a.0 * rr, Double(mid) + a.1 * rr) }
+        func ringHue(_ p: (Double, Double)) -> Bool { inside(Int(p.0), Int(p.1)) && (frameHue(img.rgb(Int(p.0), Int(p.1))).map { sameHue($0, hue) } ?? false) }
+        // a thin ring: on it all round, not just inside it nor just outside it
+        if angles.allSatisfy({ ringPoint(at($0, r).0, at($0, r).1, hue) }),
+           angles.filter({ ringHue(at($0, r - gap)) || ringHue(at($0, r + gap)) }).count <= 1 { out.append(n.name) }
+    }
+    // Two people talking over each other are both framed (screenSpeakers sorts out which voice is whose over many looks); more at
+    // once is a colour that is not the frame (a violet theme, avatar rooms), which would vote for every voice.
+    return out.count <= 2 ? out : []
 }
 
 // MARK: folders and subfolders: a subfolder is a path, "Project/Standups"

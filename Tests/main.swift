@@ -95,6 +95,42 @@ let bare = [line(1000, "sys", "Hi all."), line(6000, "sys", "Next."), line(20000
 let fromScreen = labelFromScreen(bare, [(1500, "Oleg"), (7000, "Maryna"), (20500, "Oleg"), (21000, "Maryna"), (30500, "Ivan")])
 assert(fromScreen.map(\.spk) == ["@Oleg", "@Maryna", nil, nil], "\(fromScreen.map(\.spk))")
 assert(speakerNames(fromScreen, names: [:]) == ["@Oleg": "Oleg", "@Maryna": "Maryna"] && transcriptCopy(fromScreen).hasPrefix("Oleg: Hi all.\nMaryna: Next.\nThem: Both?"))
+
+// the call app's frame around who talks: tiles with a name in the corner or in the middle, an avatar ring, not buttons or other colours
+func canvas(_ draw: (inout Pixels) -> Void) -> Pixels {
+    var p = Pixels(w: 600, h: 400, rgba: [UInt8](repeating: 40, count: 600 * 400 * 4))
+    draw(&p)
+    return p
+}
+func paint(_ p: inout Pixels, _ x: Int, _ y: Int, _ c: (UInt8, UInt8, UInt8)) {
+    guard x >= 0, y >= 0, x < p.w, y < p.h else { return }
+    let i = (y * p.w + x) * 4; p.rgba[i] = c.0; p.rgba[i + 1] = c.1; p.rgba[i + 2] = c.2
+}
+func frame(_ p: inout Pixels, _ x0: Int, _ y0: Int, _ x1: Int, _ y1: Int, _ c: (UInt8, UInt8, UInt8)) {
+    for t in 0..<3 {
+        for x in x0...x1 { paint(&p, x, y0 + t, c); paint(&p, x, y1 - t, c) }
+        for y in y0...y1 { paint(&p, x0 + t, y, c); paint(&p, x1 - t, y, c) }
+    }
+}
+let zoomGreen: (UInt8, UInt8, UInt8) = (60, 200, 90), teamsViolet: (UInt8, UInt8, UInt8) = (127, 133, 245)
+let corner = (name: "Oleg Petrenko", x: 60, y: 180, w: 90, h: 12), middle = (name: "Maryna", x: 380, y: 120, w: 60, h: 14)
+assert(framedNames(canvas { frame(&$0, 50, 50, 260, 200, zoomGreen) }, [corner, middle]) == ["Oleg Petrenko"])
+assert(framedNames(canvas { frame(&$0, 320, 40, 540, 220, teamsViolet) }, [corner, middle]) == ["Maryna"])  // camera off: name in the middle
+assert(framedNames(canvas { frame(&$0, 50, 50, 260, 200, (220, 40, 40)) }, [corner]).isEmpty)  // a red annotation box
+assert(framedNames(canvas { frame(&$0, 50, 50, 260, 200, (240, 180, 30)) }, [corner]).isEmpty)  // amber: a raised hand
+assert(framedNames(canvas { frame(&$0, 55, 172, 160, 198, zoomGreen) }, [corner]).isEmpty)  // tight around the text: a selected button
+assert(framedNames(canvas { p in frame(&p, 50, 50, 260, 200, zoomGreen); for y in 180..<192 { for x in 60..<150 { paint(&p, x, y, zoomGreen) } } }, [corner]).isEmpty)  // a green button
+let ring = canvas { p in
+    for a in 0..<720 { for r in 58...61 { let t = Double(a) * .pi / 360; paint(&p, 300 + Int(Double(r) * cos(t)), 150 + Int(Double(r) * sin(t)), teamsViolet) } }
+}
+assert(framedNames(ring, [(name: "Lynne Robbins", x: 262, y: 222, w: 76, h: 12)]) == ["Lynne Robbins"])
+assert(framedNames(ring, [(name: "Lynne Robbins", x: 250, y: 222, w: 76, h: 12)]) == ["Lynne Robbins"])  // the name off centre: "Lynne Robbins (External)"
+let disc = canvas { p in for y in 90...210 { for x in 240...360 where (x - 300) * (x - 300) + (y - 150) * (y - 150) <= 3600 { paint(&p, x, y, teamsViolet) } } }
+assert(framedNames(disc, [(name: "Lynne Robbins", x: 262, y: 222, w: 76, h: 12)]).isEmpty)  // an avatar of initials on a coloured disc
+let three = [(name: "Anna", x: 30, y: 100, w: 40, h: 12), (name: "Ivan", x: 230, y: 100, w: 40, h: 12), (name: "Olena", x: 430, y: 100, w: 40, h: 12)]
+let tiles = canvas { p in for i in 0..<3 { frame(&p, 20 + i * 200, 10, 180 + i * 200, 125, teamsViolet) } }
+assert(framedNames(tiles, Array(three.prefix(2))) == ["Anna", "Ivan"] && framedNames(tiles, three).isEmpty)  // two talk over each other; three: the theme
+assert(framedNames(Pixels(w: 0, h: 0, rgba: []), [corner]).isEmpty)
 let mixed = labelFromScreen(labelled, [(60500, "Ivan")])
 assert(speakerNames(mixed, names: [:]) == ["1-1": "Speaker 1", "1-2": "Speaker 2", "@Ivan": "Ivan"] && speakerNames([mixed[0], mixed[3]], names: [:]) == ["1-1": "Speaker 1", "@Ivan": "Ivan"])
 // old transcripts without "spk" still load
