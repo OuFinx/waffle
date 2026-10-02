@@ -528,7 +528,8 @@ func speakingNames(_ texts: [String]) -> [String] {
 /// The people the call window shows (video tiles, participant list): names of 2 to 4 capitalised words, in the order first seen.
 func rosterNames(_ texts: [String]) -> [String] {
     var out: [String] = []
-    for t in texts where t.count <= 80 && !t.contains("|") && !t.contains(" - ") {  // "Weekly Sync | Microsoft Teams": a window title if let n = personName(t), !out.contains(n) { out.append(n) } }
+    // "Weekly Sync | Microsoft Teams", "Zoom Meeting - Oleg": window titles, not people
+    for t in texts where t.count <= 80 && !t.contains("|") && !t.contains(" - ") { if let n = personName(t), !out.contains(n) { out.append(n) } }
     return out
 }
 
