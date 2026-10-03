@@ -276,15 +276,20 @@ for round in 0..<40 {
         return out
     }
     let delay = rand(3)
+    // now and then the recognizer gives up on a pass that is not final (Parakeet does): nothing, or the first two words
+    func flaky(_ p: Pass) -> [Segment] {
+        let all = hear(p)
+        guard !p.final, rand(7) == 0 else { return all }
+        return rand(2) == 0 ? [] : Array(all.prefix(4))
+    }
     for c in stride(from: 0, to: Int((t + 3) * 16000), by: 4096) {
         let talking = said.contains { $0.start < c + 4096 && $0.end > c }
-        // the stream may stop for a moment between words (screen capture while nothing plays, the mic muted): the window ends early
-        let silentAround = !said.contains { $0.start < c + 4096 * 2 && $0.end > c - 4096 }
-        if silentAround && rand(6) == 0 { waiting.append(win.flush()) }
+        // the window may end at any moment (the stream stopped, the mic was muted, the Mac slept), even inside a word
+        if rand(12) == 0 { waiting.append(win.flush()) }
         waiting.append(win.push([Float](repeating: 0, count: 4096), speech: talking))
-        while waiting.count > delay { for p in waiting.removeFirst() { take(win.done(p, hear(p))) } }
+        while waiting.count > delay { for p in waiting.removeFirst() { take(win.done(p, flaky(p))) } }
     }
-    for ps in waiting + [win.flush()] { for p in ps { take(win.done(p, hear(p))) } }
+    for ps in waiting + [win.flush()] { for p in ps { take(win.done(p, flaky(p))) } }
     let text = shown.sorted { $0.key < $1.key }.map(\.value.text).joined()
     assert(text == said.map(\.text).joined(), "round \(round): \(text)\nwanted \(said.map(\.text).joined())")
 }
@@ -312,6 +317,11 @@ func noise(_ n: Int) -> [Float] { (0..<n).map { _ in seed = seed &* 636413622384
 let ref = noise(4096 + 4800), voice = noise(4096)
 assert(echoLike(Array(ref[(4800 - 3200)..<(4800 - 3200 + 4096)]).map { $0 * 0.4 }, ref, maxLag: 4800))  // their sound, 200 ms later, quieter
 assert(!echoLike(voice, ref, maxLag: 4800) && !echoLike([Float](repeating: 0, count: 4096), ref, maxLag: 4800))
+
+// quiet audio is brought up for the recognizer, loud audio down, without clipping
+let soft = (0..<16000).map { Float(sin(Double($0) / 10)) * 0.003 }
+let up = leveled(soft), down = leveled(soft.map { $0 * 300 })
+assert(abs(up.map(abs).max()! - 0.09) < 0.005 && down.map(abs).max()! <= 0.99 && leveled([Float](repeating: 0, count: 2000)) == [Float](repeating: 0, count: 2000))
 
 // which app holds the microphone
 assert(callAppName(bundle: "com.google.Chrome.helper", path: "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper", name: "Google Chrome Helper") == "Google Chrome")

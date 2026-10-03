@@ -336,7 +336,7 @@ actor Source {
     private var fed = 0  // samples handed to the windows so far: the stream's sample count
     private var pending: [Float] = []
     private var vad: VadStreamState?
-    private var floor: Float = 0.003  // the room's loudness when nobody speaks, for when the voice model is not loaded yet
+    private var voiceLevel = VoiceLevel()
     private var speaking = false, hearing = false
     private var passes: Task<Void, Never>?  // the last recognition pass; each waits for the one before
     private var busy = false  // a piece is being worked on
@@ -384,13 +384,12 @@ actor Source {
         if name == "mic", rec.speakersInUse, let ref = await rec.reference(endMs: ms + 256, count: chunk + 4800), echoLike(x, ref, maxLag: 4800) {
             x = quiet(chunk)  // the speakers coming back into the mic, past echo cancellation
         }
+        let (heard, rms) = voiceLevel.adjust(x)  // quiet speakers heard as well as loud ones
         let p: Float
-        if let r = await Engine.shared.speech(x, vad) {
+        if let r = await Engine.shared.speech(heard, vad) {
             vad = r.state; p = r.p
         } else {
-            let rms = (x.reduce(0) { $0 + $1 * $1 } / Float(x.count)).squareRoot()
-            floor = rms < floor * 1.5 ? 0.95 * floor + 0.05 * rms : floor * 1.002
-            p = rms > max(0.006, floor * 3) ? 1 : 0
+            p = rms > max(0.0015, voiceLevel.floor * 3) ? 1 : 0  // the voice model is not loaded yet: loudness
         }
         speaking = speaking ? p >= 0.35 : p >= 0.5
         if speaking && !hearing { hearing = true; rec.hearing(name, true) }
@@ -460,7 +459,7 @@ actor Source {
                 return try d.finalizeSession()
             }
             emit(u)
-            emit(u??.tentativeSegments)  // finalizeSession settles these after it returns: they are the last turns
+            emit(u?.tentativeSegments)  // finalizeSession settles these after it returns: they are the last turns
             diarizer = nil
         }
         let t = tape

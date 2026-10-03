@@ -905,7 +905,9 @@ final class Windower {
     private(set) var buf: [Float] = []  // context + window
     private(set) var ctx = 0, start = 0, active = false  // active: a window is open
     private var clock = 0, quiet = 0, since = 0, gen = 0, inFlight = false
-    private var ended = 0  // where the last window ended: audio before it was that window's, it can only be context now
+    private var emitted = Int.min / 2  // where the last word given as final ends (stream sample)
+    private var recent: [String] = []  // the last words given as final: a window that started while the last one was ending hears them again
+    private var heard: [Segment] = []  // the last text of the open window (from its start): a pass that comes back with far less is a failed one
     private var previous: [String]?  // the sentences of the last pass over this window, to lock only what two passes agree on
 
     /// Audio of this speaker, in order; `speech` is whether it holds speech. Returns the passes to run, in order.
@@ -916,7 +918,7 @@ final class Windower {
             if buf.count > ctxMax + preroll { buf.removeFirst(buf.count - ctxMax - preroll) }
             guard speech else { return [] }
             active = true
-            let lead = min(buf.count, preroll + chunk.count, clock - ended)
+            let lead = min(buf.count, preroll + chunk.count)
             ctx = buf.count - lead; start = clock - lead
             quiet = 0; since = lead; previous = nil
             return []
@@ -942,7 +944,7 @@ final class Windower {
 
     private func finish() -> Pass {
         let p = pass(final: true)
-        gen += 1; active = false; inFlight = false; previous = nil; ended = clock
+        gen += 1; active = false; inFlight = false; previous = nil
         buf = Array(buf.suffix(ctxMax))
         return p
     }
@@ -959,8 +961,25 @@ final class Windower {
             if t.text.hasPrefix(" ") { mine = t.start >= c - 0.08 }
             if mine { own.append((max(0, t.start - c), max(0, t.end - c), t.text)) }
         }
-        if p.final { return own.isEmpty ? [] : [Emit(start: p.start, final: true, segments: own)] }
+        // A window that started while the one before was ending hears its last words again: the words at its start that repeat the
+        // last final words, and start before those ended (plus 0.3 s), are that window's.
+        let ws = wordSpans(own), soon = Double(emitted - p.start) / Double(rate) + 0.3
+        let k = repeatedWords(ws.filter { $0.start < soon }.map(\.word), recent)
+        if k > 0 { own.removeFirst(ws[k - 1].tokenEnd) }
+        // The recognizer sometimes gives up on a window it heard fine a moment ago (nothing, or the first few words): a pass with less
+        // than half the words of the one before on the same window, now longer, is a failed pass. A final one keeps the text before.
+        let failed = wordSpans(own).count * 2 < wordSpans(heard).count
+        if p.final {
+            let before = heard  // passes come back in order: what was heard is this window's
+            heard = []
+            if failed { own = before }
+            guard let last = own.last else { return [] }
+            given(own, p.start + Int(last.end * Double(rate)))
+            return [Emit(start: p.start, final: true, segments: own)]
+        }
         guard p.gen == gen, active, p.start == start else { return [] }  // the window was finished since: its final pass has the text
+        if failed { return [] }
+        heard = own
         let len = Double(p.audio.count - p.ctx) / Double(rate)
         let now = sentences(own)
         var n = lockableSentences(now, previous: previous, audioEnd: len)
@@ -980,6 +999,8 @@ final class Windower {
             previous = now.map(\.text)
             return [Emit(start: p.start, final: false, segments: own)]
         }
+        heard = own[k...].map { (max(0, $0.start - at), max(0, $0.end - at), $0.text) }
+        if k > 0 { given(Array(own[..<k]), p.start + Int(own[k - 1].end * Double(rate))) }
         let samples = min(Int(at * Double(rate)), buf.count - ctx)
         let shift = Double(samples) / Double(rate)
         start += samples
@@ -990,8 +1011,73 @@ final class Windower {
         return [Emit(start: p.start, final: true, segments: Array(own[..<k])), Emit(start: start, final: false, segments: rest)]
     }
 
+    /// Words given as final, ending at stream sample `end`.
+    private func given(_ segs: [Segment], _ end: Int) {
+        emitted = max(emitted, end)
+        recent = Array((recent + wordSpans(segs).map(\.word)).suffix(8))
+    }
+
     /// Just after a sentence's last word, before the next word starts.
     private func cutTime(_ s: Sentence) -> Double { s.next.map { min(s.end + 0.15, (s.end + $0) / 2) } ?? s.end + 0.15 }
+}
+
+/// Audio brought to the level the recognizer works best at: its speech (the loudest tenth of its 32 ms frames) at about -22 dBFS, at
+/// most 30 times louder, never clipping. Parakeet makes up words on very quiet audio ("thousands of the same thing" for a quiet
+/// "thousands") that it gets right once it is louder.
+func leveled(_ x: [Float]) -> [Float] {
+    let speech = speechLevel(x)
+    guard speech > 1e-5 else { return x }
+    var peak: Float = 0
+    for v in x { peak = max(peak, abs(v)) }
+    let gain = min(30, 0.08 / speech, 0.99 / max(peak, 1e-9))
+    return abs(gain - 1) < 0.1 ? x : x.map { $0 * gain }
+}
+
+/// Voice detection misses quiet speech (a far-off mic, a quiet call, a quiet person right after a loud one: -50 dB and below) that the
+/// recognizer still gets right, so it hears each 256 ms piece at one level, up to 20 times louder; what is not above the room's own
+/// noise (followed quickly down, slowly up) stays quiet.
+struct VoiceLevel {
+    private(set) var floor: Float = 0.001
+
+    /// The piece as voice detection should hear it, and its loudness (RMS) as it came.
+    mutating func adjust(_ x: [Float]) -> (heard: [Float], rms: Float) {
+        let rms = (x.reduce(0) { $0 + $1 * $1 } / Float(max(1, x.count))).squareRoot()
+        floor = rms < floor ? 0.9 * floor + 0.1 * rms : min(floor * 1.01, 0.05)
+        let gain = min(20, 0.05 / max(rms, 3 * floor, 0.0005))
+        return (abs(gain - 1) > 0.05 ? x.map { $0 * gain } : x, rms)
+    }
+}
+
+/// How loud the speech in some audio is: the RMS of its loudest tenth of 32 ms frames (0 for less than a frame).
+func speechLevel(_ x: [Float]) -> Float {
+    let n = 512
+    guard x.count >= n else { return 0 }
+    var frames: [Float] = []
+    frames.reserveCapacity(x.count / n)
+    var i = 0
+    while i + n <= x.count {
+        var e: Float = 0
+        for k in i..<(i + n) { e += x[k] * x[k] }
+        frames.append((e / Float(n)).squareRoot()); i += n
+    }
+    frames.sort()
+    return frames[min(frames.count - 1, frames.count * 9 / 10)]
+}
+
+/// The words of recognizer tokens, lowercased without punctuation, with when each starts and the index after its last token.
+func wordSpans(_ tokens: [Segment]) -> [(word: String, start: Double, tokenEnd: Int)] {
+    var out: [(word: String, start: Double, tokenEnd: Int)] = []
+    for (i, t) in tokens.enumerated() {
+        let core = t.text.lowercased().filter { $0.isLetter || $0.isNumber }
+        if t.text.hasPrefix(" ") || out.isEmpty { out.append((core, t.start, i + 1)) } else { out[out.count - 1].word += core; out[out.count - 1].tokenEnd = i + 1 }
+    }
+    return out
+}
+
+/// How many of `words` (the start of a window) repeat the end of `recent`, most first.
+func repeatedWords(_ words: [String], _ recent: [String]) -> Int {
+    for k in stride(from: min(words.count, recent.count), to: 0, by: -1) where Array(words.prefix(k)) == Array(recent.suffix(k)) { return k }
+    return 0
 }
 
 /// Wall time of the samples of one audio stream: anchors where the stream started or jumped (a gap while nothing played, a clock that
