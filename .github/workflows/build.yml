@@ -24,9 +24,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/Library/Application Support/FluidAudio
-          key: fluidaudio-models-0.17.4-ultra
+          key: fluidaudio-models-0.17.4-ultra-v3
       - name: Check with the real models
         # Speech made with macOS's voices in several languages and rates, recognized whole, live through the windows, and as the pass
         # after a call. Slow on CI (no Neural Engine), so it runs once the build is green.
         run: swift run -c release WaffleCheck
+        timeout-minutes: 40
+      - name: Check with Parakeet v3 (for comparison)
+        if: always()
+        continue-on-error: true
+        run: WAFFLE_ASR=v3 swift run -c release WaffleCheck
         timeout-minutes: 40
