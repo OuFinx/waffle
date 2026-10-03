@@ -27,7 +27,8 @@ actor Gate {
 
 final class Engine: @unchecked Sendable {
     static let shared = Engine()
-    static let asrVersion = AsrModelVersion.ultra
+    /// Parakeet v3 "ultra" (more accurate than v3 in every language FluidAudio measured); WAFFLE_ASR=v3 for the plain v3 (CI compares them).
+    static let asrVersion: AsrModelVersion = ProcessInfo.processInfo.environment["WAFFLE_ASR"] == "v3" ? .v3 : .ultra
 
     private let gate = Gate()
     private let lock = NSLock()

@@ -47,7 +47,7 @@ func pad(_ x: [Float], _ seconds: Double) -> [Float] { quiet(Int(seconds * 16000
 
 /// The live path: 256 ms at a time, voice detection, the windows, each pass recognized while the next audio comes in, the text as the
 /// transcript keeps it. Returns the final text and the longest pass.
-func live(_ audio: [Float]) async throws -> (text: String, longest: Int, passes: Int, firstText: Double?) {
+func live(_ audio: [Float], trace: Bool = false) async throws -> (text: String, longest: Int, passes: Int, firstText: Double?) {
     let w = Windower()
     var state: VadStreamState?, speaking = false, lines: [Line] = [], waiting: [Pass] = [], longest = 0, passes = 0, firstText: Double?
     var level = VoiceLevel()
@@ -55,6 +55,7 @@ func live(_ audio: [Float]) async throws -> (text: String, longest: Int, passes:
         for p in ps {
             longest = max(longest, p.audio.count); passes += 1
             let tokens = try await Engine.shared.transcribe(p.audio)
+            if trace { print(String(format: "      pass at %.1f s: %.1f s (%.1f context)%@: %@", t, Double(p.audio.count) / 16000, Double(p.ctx) / 16000, p.final ? " final" : "", tokens.map(\.text).joined())) }
             for e in w.done(p, tokens) {
                 if firstText == nil, !e.segments.isEmpty { firstText = t }
                 lines = replaceWindow(lines, src: "sys", w: e.start / 16, part: 1, final: e.final, segments: e.segments)
@@ -89,7 +90,7 @@ var failures: [String] = []
 func check(_ ok: Bool, _ what: String) { print(ok ? "  ok   " : "  FAIL ", what); if !ok { failures.append(what) } }
 
 let started = Date()
-print("downloading and loading the models...")
+print("downloading and loading the models (Parakeet \(Engine.asrVersion == .v3 ? "v3" : "v3 ultra"))...")
 _ = try await AsrModels.download(version: Engine.asrVersion)
 _ = try await VadManager(config: .default)
 Engine.shared.retain()
@@ -193,7 +194,7 @@ if have.contains("Lesya") && have.contains("Samantha") {
                  ("Samantha", "The migration is still blocked."), ("Lesya", "Олег оновить ключі до четверга."), ("Samantha", "Great, thank you everyone.")]
     var audio = quiet(16000)
     for (v, t) in mixed { audio += try say(v, 190, t) + quiet(9000) }
-    let lv = try await live(audio)
+    let lv = try await live(audio, trace: true)
     let e = wer(mixed.map(\.1).joined(separator: " "), lv.text)
     print(String(format: "mixed Ukrainian and English, live: %.0f%%", e * 100))
     print("    \(lv.text)")
