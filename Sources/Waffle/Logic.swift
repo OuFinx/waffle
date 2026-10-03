@@ -878,7 +878,13 @@ Reply in the language of the question. Use 24-hour time.
 
 /// One recognition pass a Windower asks for: the window's audio with up to `ctx` samples of what came before it (context the recognizer
 /// hears but whose words are not this window's), and the window's start, in samples of this speaker's stream.
-struct Pass { let gen: Int; let audio: [Float]; let ctx: Int; let start: Int; let final: Bool }
+struct Pass {
+    let gen: Int; let audio: [Float]; let ctx: Int; let start: Int; let final: Bool
+    var voiced = 0  // samples of the window (not its context) voice detection took for speech
+
+    /// The same pass without its context: for when the context threw the recognizer off (see Windower.thin).
+    var bare: Pass { Pass(gen: gen, audio: Array(audio[ctx...]), ctx: 0, start: start, final: final, voiced: voiced) }
+}
 
 /// Text for a window: the window's start in samples, final or not, and its words timed from the window start.
 struct Emit { let start: Int; let final: Bool; let segments: [Segment] }
@@ -904,7 +910,7 @@ final class Windower {
 
     private(set) var buf: [Float] = []  // context + window
     private(set) var ctx = 0, start = 0, active = false  // active: a window is open
-    private var clock = 0, quiet = 0, since = 0, gen = 0, inFlight = false
+    private var clock = 0, quiet = 0, since = 0, gen = 0, inFlight = false, voiced = 0
     private var emitted = Int.min / 2  // where the last word given as final ends (stream sample)
     private var recent: [String] = []  // the last words given as final: a window that started while the last one was ending hears them again
     private var heard: [Segment] = []  // the last text of the open window (from its start): a pass that comes back with far less is a failed one
@@ -920,10 +926,11 @@ final class Windower {
             active = true
             let lead = min(buf.count, preroll + chunk.count)
             ctx = buf.count - lead; start = clock - lead
-            quiet = 0; since = lead; previous = nil
+            quiet = 0; since = lead; previous = nil; voiced = chunk.count
             return []
         }
         since += chunk.count
+        if speech { voiced += chunk.count }
         quiet = speech ? 0 : quiet + chunk.count
         if quiet >= pauseEnd || (quiet >= pauseFinal && buf.count - ctx >= minFinal) || buf.count >= limit + 16000 * 2 { return [finish()] }
         if !inFlight, buf.count >= limit || (since >= updateMin && (quiet >= pauseUpdate || since >= updateMax)) {
@@ -939,7 +946,7 @@ final class Windower {
     /// The window and as much of its context as fits in what the model hears at once.
     private func pass(final: Bool) -> Pass {
         let drop = min(ctx, max(0, buf.count - hard))
-        return Pass(gen: gen, audio: Array(buf[drop...]), ctx: ctx - drop, start: start, final: final)
+        return Pass(gen: gen, audio: Array(buf[drop...]), ctx: ctx - drop, start: start, final: final, voiced: voiced)
     }
 
     private func finish() -> Pass {
@@ -950,17 +957,34 @@ final class Windower {
     }
 
     /// A pass came back with tokens timed from the start of its audio (nil: it failed). Returns the text to show, in order.
+    /// A pass whose own words are too few for the speech in it (under 1.2 a second of speech, from 2 s on): the context before can throw
+    /// the recognizer off, as when it was in another language ("Добрий день, колеги." then "Good afternoon..." came back without the
+    /// English). The Recorder then tries the pass without its context and keeps whichever heard more.
+    func thin(_ p: Pass, _ tokens: [Segment]) -> Bool {
+        let seconds = Double(p.voiced) / Double(rate)
+        return p.ctx > 0 && seconds >= 2 && Double(wordSpans(mine(p, tokens)).count) < 1.2 * seconds
+    }
+
+    /// The words of a pass that are its window's, timed from the window start.
+    private func mine(_ p: Pass, _ tokens: [Segment]) -> [Segment] {
+        let c = Double(p.ctx) / Double(rate)
+        var own: [Segment] = [], keep = p.ctx == 0
+        for t in tokens {
+            if t.text.hasPrefix(" ") { keep = t.start >= c - 0.08 }
+            if keep { own.append((max(0, t.start - c), max(0, t.end - c), t.text)) }
+        }
+        return own
+    }
+
+    /// How many of the pass's own words there are (to compare a pass with and without its context).
+    func words(_ p: Pass, _ tokens: [Segment]) -> Int { wordSpans(mine(p, tokens)).count }
+
     func done(_ p: Pass, _ tokens: [Segment]?) -> [Emit] {
         if !p.final && p.gen == gen { inFlight = false }
         guard let tokens else { return [] }
-        let c = Double(p.ctx) / Double(rate)
         // The context's words belong to the window before, whole: a word goes with the window it starts in, pieces and punctuation
         // with it (token times move a little from pass to pass, so a piece of the last locked word can land after the edge).
-        var own: [Segment] = [], mine = p.ctx == 0
-        for t in tokens {
-            if t.text.hasPrefix(" ") { mine = t.start >= c - 0.08 }
-            if mine { own.append((max(0, t.start - c), max(0, t.end - c), t.text)) }
-        }
+        var own = mine(p, tokens)
         // A window that started while the one before was ending hears its last words again: the words at its start that repeat the
         // last final words, and start before those ended (plus 0.3 s), are that window's.
         let ws = wordSpans(own), soon = Double(emitted - p.start) / Double(rate) + 0.3
@@ -1002,6 +1026,7 @@ final class Windower {
         heard = own[k...].map { (max(0, $0.start - at), max(0, $0.end - at), $0.text) }
         if k > 0 { given(Array(own[..<k]), p.start + Int(own[k - 1].end * Double(rate))) }
         let samples = min(Int(at * Double(rate)), buf.count - ctx)
+        voiced = max(0, voiced - samples)
         let shift = Double(samples) / Double(rate)
         start += samples
         let keep = min(ctxMax, ctx + samples)
