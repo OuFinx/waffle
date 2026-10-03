@@ -16,5 +16,12 @@ let package = Package(
             path: "Sources/Waffle",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // CI's end-to-end check with the real models (`swift run -c release WaffleCheck`); shares the app's Logic.swift and Engine.swift.
+        .executableTarget(
+            name: "WaffleCheck",
+            dependencies: [.product(name: "FluidAudio", package: "FluidAudio")],
+            path: "Sources/WaffleCheck",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )
