@@ -23,7 +23,7 @@ func wallMs(_ host: UInt64?) -> Double {
     return now + delta * Double(tb.numer) / Double(tb.denom) / 1_000_000
 }
 
-/// What a recording leaves for the pass after the call: each speaker's tape.
+/// What a recording leaves for after the call: the tapes (the microphone's stays empty: only the other side's voices are told apart).
 struct Tapes { var mic: Tape; var sys: Tape }
 
 final class Recorder {
@@ -393,7 +393,7 @@ actor Source {
         }
         speaking = speaking ? p >= 0.35 : p >= 0.5
         if speaking && !hearing { hearing = true; rec.hearing(name, true) }
-        tape.add(x, ms: ms, speech: speaking)
+        if name == "sys" { tape.add(x, ms: ms, speech: speaking) }  // for telling the voices apart after the call
         fed += x.count
         if name == "sys" { await diarize(x, ms) }
         run(windower.push(x, speech: speaking))

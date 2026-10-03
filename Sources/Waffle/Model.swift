@@ -154,7 +154,6 @@ final class Model: ObservableObject {
     private var settled: [String: String] = [:]  // names the call window gave to voices in this recording; they stay, see settleNames
     private var lastSpeech: Date?, micSeen = false, micEmptySince: Date?
     private var toastTimer: Timer?
-    private var deleted: [Line] = []  // lines the user deleted while this recording ran: the pass after the call leaves them out
     private var selfName: String?  // the user's own name as the call window shows it
 
     init() {
@@ -316,7 +315,7 @@ final class Model: ObservableObject {
         lastSpeech = nil; micSeen = false; micEmptySince = nil; callEnding = false
         Store.updateMeta(id, ["recording": true])  // stays set if the app dies mid-meeting, see interrupted()
         status = .recording; detail = ""; hearing = []; micMuted = false; callMuted = false; turns = []; talking = []; seenPeople = [:]; renamed = [:]; settled = [:]
-        deleted = []; selfName = nil
+        selfName = nil
         guard Engine.downloaded else { status = .done; Store.updateMeta(id, ["recording": false]); showSetup = true; return fail("The speech models are not downloaded yet: finish the setup first") }
         Engine.shared.retain()
         if Agenda.enabled, let e = Agenda.current() {
@@ -391,8 +390,8 @@ final class Model: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "followCallMute") }
     }
 
-    /// Settings: after the call, the whole recording is recognised again with full context and its speakers told apart again, before the
-    /// notes are written. On unless turned off.
+    /// Settings: after the call, the other side's voices are told apart again over the whole call, before the notes are written. On
+    /// unless turned off.
     static var polishEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "polish") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "polish") }
@@ -459,64 +458,45 @@ final class Model: ObservableObject {
             Store.saveLines(id, lines)
             saveScreenNames(id)
             Store.updateMeta(id, ["recording": false])
-            guard Model.polishEnabled, tapes.mic.seconds + tapes.sys.seconds >= 3 else { return wrapUp(id) }
-            detail = "making the transcript better"
+            guard Model.polishEnabled, tapes.sys.seconds >= 3, !tapes.sys.full else { return wrapUp(id) }
+            detail = "telling the voices apart"
             polish(id, tapes)
         }
     }
 
-    /// The second pass: the whole recording again, now with full context, and the other side's voices told apart over the whole call (no
-    /// limit of 4). It replaces this recording's live lines when it lost no text; names given to voices carry over.
+    /// After the call, the other side's voices are told apart again over the whole call (no limit of 4 voices, about 10 s for an hour),
+    /// and this recording's "Them" lines get those voices. The text stays as it was: measured on real recordings, the live text is as good
+    /// as recognizing each utterance on its own. Names given to voices carry over; the live voices stay when the whole-call ones tell
+    /// fewer voices apart (similar voices lumped together on a short call).
     private func polish(_ id: String, _ tapes: Tapes) {
-        let part = self.part, live = lines.filter { $0.part == part }, deleted = self.deleted, talking = self.talking
+        let part = self.part, live = lines.filter { $0.part == part }, talking = self.talking, tape = tapes.sys
         let invited = (Store.meta(id)["calendar"] as? [String: Any])?["invited"] as? [String] ?? []
         let people = livePeople.count
         Task.detached(priority: .userInitiated) { [self] in
             let started = Date()
-            var fresh: [Line] = []
-            var ok = true
-            for (src, tape) in [("mic", tapes.mic), ("sys", tapes.sys)] where ok {
-                guard tape.seconds >= 1, !tape.full else { fresh += live.filter { $0.src == src }; continue }  // too little or too long to redo
-                for g in tapeGroups(tape) {
-                    guard let tokens = try? await Engine.shared.transcribe(tape.floats(g)) else { ok = false; break }
-                    fresh += tapeLines(tokens, src: src, part: part, clock: tape.clock, from: g.lowerBound)
-                }
-            }
-            var sysTurns: [Turn] = []
-            if ok, tapes.sys.seconds >= 3, !tapes.sys.full {
-                let most = max(people, invited.count) > 0 ? max(people, invited.count) + 1 : nil
-                if let segs = try? await Engine.shared.diarize(tapes.sys.floats, maxSpeakers: most) {
-                    sysTurns = segs.map { Turn(start: Int(tapes.sys.clock.ms(Int($0.start * 16000))), end: Int(tapes.sys.clock.ms(Int($0.end * 16000))), spk: $0.spk) }
-                }
-            }
-            fresh = dropEcho(withoutDeleted(fresh, deleted).sorted { $0.t < $1.t })
-            // The whole-call speakers replace the live ones only when they tell at least as many voices apart (they can lump similar
-            // voices together on a short call, where the live labels did better).
+            let most = max(people, invited.count) > 0 ? max(people, invited.count) + 1 : nil
+            let segs = (try? await Engine.shared.diarize(tape.floats, maxSpeakers: most)) ?? []
+            let turns = segs.map { Turn(start: Int(tape.clock.ms(Int($0.start * 16000))), end: Int(tape.clock.ms(Int($0.end * 16000))), spk: $0.spk) }
             let liveVoices = Set(live.compactMap { $0.src == "sys" ? $0.spk : nil }.filter { !$0.hasPrefix("@") })
-            if Set(sysTurns.map(\.spk)).count < max(1, liveVoices.count) { sysTurns = [] }
-            if !sysTurns.isEmpty {
-                let carried = carryVoices(live: live, turns: sysTurns)
-                let turns = sysTurns.map { Turn(start: $0.start, end: $0.end, spk: carried[$0.spk] ?? "\(part)-\($0.spk)") }
-                fresh = labelFromScreen(labelSpeakers(fresh, turns), talking)
-            } else {
-                fresh = labelFromScreen(labelSpeakers(fresh, self.turnsOf(live)), talking)
+            let use = !turns.isEmpty && Set(turns.map(\.spk)).count >= max(1, liveVoices.count)
+            var relabeled = live
+            if use {
+                let carried = carryVoices(live: live, turns: turns)
+                relabeled = labelFromScreen(labelSpeakers(live, turns.map { Turn(start: $0.start, end: $0.end, spk: carried[$0.spk] ?? "\(part)-\($0.spk)") }), talking)
             }
-            let keep = ok && !fresh.isEmpty && polishKeeps(live: live, fresh: fresh)
-            log.info("second pass: \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s, \(keep ? "used" : "dropped")")
+            log.info("speakers after the call: \(Set(turns.map(\.spk)).count) voices in \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s, \(use ? "used" : "kept the live ones")")
             DispatchQueue.main.async { [self] in
-                if keep, activeId == id {
-                    lines = (lines.filter { $0.part != part } + fresh).sorted { $0.t < $1.t }
+                if use, activeId == id {
+                    let byTime = Dictionary(relabeled.map { ($0.t * 4 + ($0.src == "sys" ? 1 : 0), $0.spk) }) { a, _ in a }
+                    lines = lines.map { l in  // lines deleted meanwhile stay deleted
+                        guard l.part == part, l.src == "sys", let spk = byTime[l.t * 4 + 1] else { return l }
+                        var x = l; x.spk = spk; return x
+                    }
                     Store.saveLines(id, lines)
                 }
                 wrapUp(id)
             }
         }
-    }
-
-    /// Live voices as turns, for lines of the second pass when the speakers could not be told apart again.
-    private func turnsOf(_ live: [Line]) -> [Turn] {
-        let sys = live.filter { $0.src == "sys" && $0.spk != nil }
-        return sys.enumerated().map { i, l in Turn(start: l.t, end: i + 1 < sys.count ? sys[i + 1].t : l.t + 4000, spk: l.spk!) }
     }
 
     /// After the recording (and the second pass): names from the calendar, the transcript file, the summary.
@@ -784,7 +764,7 @@ final class Model: ObservableObject {
     func deleteLine(_ id: String, _ line: Line) {
         guard line.final else { return }
         let rest = (id == activeId ? lines : Store.lines(id)).filter { $0 != line }
-        if id == activeId { lines = rest; if status == .recording || status == .finalizing { deleted.append(line) } }
+        if id == activeId { lines = rest }
         Store.saveLines(id, rest)
         let md = Store.dir(id).appendingPathComponent("transcript.md")
         if FileManager.default.fileExists(atPath: md.path) { Store.write(transcriptText(rest.filter(\.final), names: Store.speakers(id)) + "\n", md) }
