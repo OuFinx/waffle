@@ -405,15 +405,26 @@ actor Source {
             let before = passes
             passes = Task { [weak self] in
                 await before?.value
-                let tokens: [Segment]?
-                do { tokens = try await Engine.shared.transcribe(p.audio) } catch {
+                guard let self else { return }
+                var pass = p, tokens: [Segment]?
+                do {
+                    tokens = try await Engine.shared.transcribe(p.audio)
+                    // Too few words for the speech: try without the context, keep what heard more (see Windower.thin).
+                    if let t = tokens, await self.thin(p, t), let bare = try? await Engine.shared.transcribe(p.bare.audio),
+                       await self.words(p.bare, bare) > Int(Double(await self.words(p, t)) * 1.3) {
+                        pass = p.bare; tokens = bare
+                    }
+                } catch {
                     tokens = nil
-                    await self?.fail(error)
+                    await self.fail(error)
                 }
-                await self?.finished(p, tokens)
+                await self.finished(pass, tokens)
             }
         }
     }
+
+    private func thin(_ p: Pass, _ t: [Segment]) -> Bool { windower.thin(p, t) }
+    private func words(_ p: Pass, _ t: [Segment]) -> Int { windower.words(p, t) }
 
     private func fail(_ e: Error) {
         guard !failed else { return }
