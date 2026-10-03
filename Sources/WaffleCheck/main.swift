@@ -107,7 +107,6 @@ if have.contains("Samantha") {
     print(String(format: "quiet after loud, live: %.0f%%: %@", e * 100, lv.text))
     check(e <= 0.2, "a quiet speaker after a loud one is transcribed")
 }
-var longStream: [Float] = [], longText: [String] = [], longVoices: [(from: Int, to: Int, voice: String)] = []
 for s in samples {
     guard let voice = s.voices.first(where: have.contains) else { print("\(s.lang): no voice installed, skipped"); continue }
     for rate in [150, 200, 280] {
@@ -124,36 +123,7 @@ for s in samples {
         if rate <= 200 { check(a <= 0.2, "\(s.lang) \(rate) wpm whole clip under 20% WER") }  // 280 wpm is past what the model hears well
         check(b <= a + 0.1, "\(s.lang) \(rate) wpm live within 10 points of the whole clip")
         check(lv.longest <= 240_000, "\(s.lang) \(rate) wpm no pass longer than 15 s")
-        if rate == 200 {
-            longVoices.append((longStream.count, longStream.count + clip.count, voice))
-            longStream += clip + quiet(16000)
-            longText.append(s.text)
-        }
     }
-}
-
-// The pass after a call: a long recording (several voices), through the tape (speech only, timed on the wall clock), recognized at once.
-if longStream.count > 16000 * 20 {
-    var tape = Tape(), state: VadStreamState?, speaking = false
-    var i = 0
-    while i + 4096 <= longStream.count {
-        let x = Array(longStream[i..<i + 4096])
-        if let r = await Engine.shared.speech(x, state) { state = r.state; speaking = speaking ? r.p >= 0.35 : r.p >= 0.5 }
-        tape.add(x, ms: 1_000_000 + Double(i) / 16, speech: speaking)
-        i += 4096
-    }
-    let t0 = Date()
-    var lines: [Line] = []
-    for g in tapeGroups(tape) { lines += tapeLines(try await Engine.shared.transcribe(tape.floats(g)), src: "sys", part: 1, clock: tape.clock, from: g.lowerBound) }
-    let text = lines.map(\.text).joined(separator: " ")
-    print("    \(text)")
-    let e = wer(longText.joined(separator: " "), text)
-    print(String(format: "second pass: %.0f s of meeting, tape %.0f s, %.0f%% WER in %.1f s, %d lines", Double(longStream.count) / 16000, tape.seconds, e * 100, Date().timeIntervalSince(t0), lines.count))
-    check(e <= 0.2, "second pass under 20% WER")
-    check(lines.allSatisfy { $0.t >= 1_000_000 && $0.t <= 1_000_000 + longStream.count / 16 }, "second pass lines on the wall clock")
-    // every line starts inside the clip it came from
-    let placed = lines.filter { l in longVoices.contains { Double(l.t - 1_000_000) >= Double($0.from) / 16 - 600 && Double(l.t - 1_000_000) <= Double($0.to) / 16 } }
-    check(placed.count == lines.count, "second pass lines timed inside their clip (\(placed.count) of \(lines.count))")
 }
 
 /// Who speaks when in a dialogue of two voices: each line said by the voice that says it.
@@ -188,10 +158,20 @@ let pairs: [(String, String, [String])] = [
 ]
 for (a, b, text) in pairs where have.contains(a) && have.contains(b) {
     let d = try dialogue(a, b, text)
+    // as the app does it: the speech kept on the tape (voice detection), the voices told apart on it, their turns back on the clock
+    var tape = Tape(), state: VadStreamState?, speaking = false, level = VoiceLevel()
+    var i0 = 0
+    while i0 + 4096 <= d.audio.count {
+        let x = Array(d.audio[i0..<i0 + 4096])
+        if let r = await Engine.shared.speech(level.adjust(x).heard, state) { state = r.state; speaking = speaking ? r.p >= 0.35 : r.p >= 0.5 }
+        tape.add(x, ms: Double(i0) / 16, speech: speaking)
+        i0 += 4096
+    }
     let t1 = Date()
-    let offline = try await Engine.shared.diarize(d.audio, maxSpeakers: nil)
+    let offline = try await Engine.shared.diarize(tape.floats, maxSpeakers: nil).map { (start: tape.clock.ms(Int($0.start * 16000)) / 1000, end: tape.clock.ms(Int($0.end * 16000)) / 1000, spk: $0.spk) }
     let p1 = purity(offline, d.who)
-    print(String(format: "speakers after the call (%@/%@): %d found, %.0f%% of speech right, %.1f s", a, b, Set(offline.map(\.spk)).count, p1 * 100, Date().timeIntervalSince(t1)))
+    print(String(format: "speakers after the call (%@/%@): %d found, %.0f%% of speech right, tape %.0f of %.0f s, %.1f s", a, b, Set(offline.map(\.spk)).count, p1 * 100, tape.seconds, Double(d.audio.count) / 16000, Date().timeIntervalSince(t1)))
+    check(tape.seconds >= Double(d.who.map { $0.to - $0.from }.reduce(0, +)) / 16000 * 0.95, "\(a)/\(b): the tape keeps the speech")
     let ls = try await LSEENDDiarizer(variant: .ami, stepSize: .step500ms)
     var liveTurns: [(start: Double, end: Double, spk: String)] = []
     var i = 0

@@ -72,7 +72,7 @@ Then join a call: Waffle notices the call app taking the microphone (Zoom, Teams
 - **Stops by itself** when the call app releases the microphone or after a long silence.
 
 **After the call**
-- **A better transcript**: Waffle recognises the whole call once more with full context and tells the voices apart again, without the live limit of 4 (about a minute for an hour; Settings > Transcript).
+- **Voices sorted out**: Waffle tells the other side's voices apart once more over the whole call, without the live limit of 4 (about 10 seconds for an hour; Settings > Transcript).
 - **Summary**: topics, decisions, owners, dates and next steps, built around your own notes if you wrote any. 10 built-in templates (Standup, One-on-one, Incident review, Customer call and more) plus your own.
 - **Ask anything** about one meeting, a folder, or all meetings. Answers link back to the meetings they came from.
 - **Copy for Slack or email**: rich text with bold and nested bullets intact.
@@ -88,7 +88,7 @@ Then join a call: Waffle notices the call app taking the microphone (Zoom, Teams
 
 | What | Where it goes |
 |---|---|
-| Audio | Recognised in memory on your Mac by [Parakeet](https://huggingface.co/moondream/parakeet-ultra) via [FluidAudio](https://github.com/FluidInference/FluidAudio). The speech is kept in memory until the second pass after the call, then discarded. Never written to disk. |
+| Audio | Recognised in memory on your Mac by [Parakeet](https://huggingface.co/moondream/parakeet-ultra) via [FluidAudio](https://github.com/FluidInference/FluidAudio). The other side's speech is kept in memory until its voices are told apart after the call, then discarded. Never written to disk. |
 | Voices | Told apart on your Mac by [LS-EEND](https://huggingface.co/FluidInference/lseend-coreml) live and [pyannote](https://huggingface.co/pyannote/speaker-diarization-community-1) after the call, via FluidAudio. |
 | Calendar | The title and the names of the people invited to the event of a call, kept with that meeting, if you allow the calendar. |
 | Transcripts, notes, summaries | Plain files in `~/Library/Application Support/Waffle`. |
@@ -116,10 +116,10 @@ One native SwiftUI app, no server and no web views.
 | `Sources/Waffle/Engine.swift` | The shared FluidAudio models (Parakeet v3 ultra, Silero, pyannote) on the Neural Engine, loaded for a call and dropped 10 minutes after, one model call at a time |
 | `Sources/Waffle/Agenda.swift` | The calendar event of a call (EventKit) |
 | `Sources/Waffle/AI.swift` | Summaries and answers through `claude -p` or `codex exec`, without tools, hooks or the user's own config |
-| `Sources/Waffle/Logic.swift` | The live windows (sentences locked when two passes agree, context kept across cuts), echo filter, audio clocks, the second pass's merge, speaker labels, call apps, prompts, templates, dates; checked by `Tests/main.swift` (`./build.sh test`, runs on Linux too) |
+| `Sources/Waffle/Logic.swift` | The live windows (sentences locked when two passes agree, context kept across cuts, failed passes ignored), audio levels, echo filter, audio clocks, speaker labels, call apps, prompts, templates, dates; checked by `Tests/main.swift` (`./build.sh test`, runs on Linux too) |
 | `Sources/Waffle/Store.swift` | Meetings, folders and reports as plain files |
 | `Sources/Waffle/ScreenNames.swift` | Names from the Zoom, Teams or Meet window (accessibility labels, or text recognition and the speaker frame on a screenshot of that window) for the speaker labels; Zoom's mute |
-| `Sources/Waffle/Model.swift` | Recording, auto stop, the second pass, summaries, reports, chat, navigation |
+| `Sources/Waffle/Model.swift` | Recording, auto stop, the voices after the call, summaries, reports, chat, navigation |
 | `Sources/Waffle/Views.swift`, `Panels.swift`, `Setup.swift`, `App.swift` | Main window, edge tab and popup, first-run setup, menu bar |
 
 Recognition runs on the Neural Engine; the models load when a call starts and are dropped 10 minutes after the last one.

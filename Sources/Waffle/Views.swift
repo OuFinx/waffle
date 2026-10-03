@@ -1471,7 +1471,7 @@ struct TranscriptSettings: View {
 
     var body: some View {
         Section {
-            Toggle("Make the transcript better after the call", isOn: $polish).onChange(of: polish) { Model.polishEnabled = polish }
+            Toggle("Tell the voices apart again after the call", isOn: $polish).onChange(of: polish) { Model.polishEnabled = polish }
             Toggle("Skip what I say while muted in Zoom", isOn: $followMute).onChange(of: followMute) { Model.followCallMute = followMute }
             HStack {
                 Text("System audio")
@@ -1486,7 +1486,7 @@ struct TranscriptSettings: View {
         } header: {
             Text("Transcript")
         } footer: {
-            Text("After the call, Waffle recognises the whole recording once more with full context and tells the voices apart again (no limit on how many), then writes the notes; it takes about a minute for an hour. The speech for it stays in memory only and is gone after. Muted in Zoom: what you say is not for the call, so it stays out of the notes (needs Accessibility, see Speaker names).")
+            Text("After the call, Waffle tells the other side's voices apart once more over the whole call (no limit on how many; live it tells at most 4), then writes the notes; about 10 seconds for an hour. The sound for it stays in memory only and is gone after. Muted in Zoom: what you say is not for the call, so it stays out of the notes (needs Accessibility, see Speaker names).")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

@@ -1021,16 +1021,43 @@ final class Windower {
     private func cutTime(_ s: Sentence) -> Double { s.next.map { min(s.end + 0.15, (s.end + $0) / 2) } ?? s.end + 0.15 }
 }
 
-/// Audio brought to the level the recognizer works best at: its speech (the loudest tenth of its 32 ms frames) at about -22 dBFS, at
-/// most 30 times louder, never clipping. Parakeet makes up words on very quiet audio ("thousands of the same thing" for a quiet
-/// "thousands") that it gets right once it is louder.
-func leveled(_ x: [Float]) -> [Float] {
-    let speech = speechLevel(x)
-    guard speech > 1e-5 else { return x }
-    var peak: Float = 0
-    for v in x { peak = max(peak, abs(v)) }
-    let gain = min(30, 0.08 / speech, 0.99 / max(peak, 1e-9))
-    return abs(gain - 1) < 0.1 ? x : x.map { $0 * gain }
+/// Audio brought to the level the recognizer works best at, a little at a time: around each 32 ms the loudest speech within a quarter
+/// second either way goes to about -22 dBFS (at most 30 times louder, never clipping), and the quiet between words never above a
+/// quarter of that. Parakeet makes up words or drops them on very quiet audio ("thousands of the same thing" for a quiet "thousands"),
+/// also when a quiet person follows a loud one in the same window, and gets them right once they are louder.
+func leveled(_ x: [Float], target: Float = 0.08, most: Float = 30, reach: Int = 8) -> [Float] {
+    let n = 512
+    guard x.count >= n else { return x }
+    var f: [Float] = [], peaks: [Float] = []
+    var i = 0
+    while i < x.count {
+        let end = min(i + n, x.count)
+        var e: Float = 0, p: Float = 0
+        for k in i..<end { e += x[k] * x[k]; p = max(p, abs(x[k])) }
+        f.append((e / Float(end - i)).squareRoot()); peaks.append(p); i = end
+    }
+    let noise = f.sorted()[f.count / 10]
+    var g = [Float](repeating: 1, count: f.count)
+    for j in f.indices {
+        let lo = max(0, j - reach), hi = min(f.count - 1, j + reach)
+        var env: Float = 0, peak: Float = 0
+        for k in lo...hi { env = max(env, f[k]); peak = max(peak, peaks[k]) }
+        g[j] = min(most, target / max(env, 1e-5), 0.99 / max(peak, 1e-9), target / 4 / max(noise, 1e-6))
+    }
+    // smoothed over five frames, then from frame to frame sample by sample
+    let s = g.indices.map { j -> Float in
+        let lo = max(0, j - 2), hi = min(g.count - 1, j + 2)
+        return g[lo...hi].reduce(0, +) / Float(hi - lo + 1)
+    }
+    var out = x
+    for k in x.indices {
+        let pos = (Float(k) - Float(n) / 2) / Float(n)
+        let j = max(0, min(s.count - 1, Int(pos.rounded(.down))))
+        let t = max(0, min(1, pos - Float(j)))
+        let gain = j + 1 < s.count ? s[j] * (1 - t) + s[j + 1] * t : s[j]
+        out[k] = max(-1, min(1, x[k] * gain))
+    }
+    return out
 }
 
 /// Voice detection misses quiet speech (a far-off mic, a quiet call, a quiet person right after a loud one: -50 dB and below) that the
@@ -1112,14 +1139,14 @@ struct ClockMap {
     }
 }
 
-/// The speech of one speaker kept for the pass after the call, in memory only: 16-bit, only the stretches around speech (from 256 ms
-/// before to a second after), each with its wall time. Stops taking more at `cap` samples (2 hours) and says so.
+/// The other side's speech kept for telling the voices apart after the call, in memory only: 16-bit, only the stretches around speech
+/// (from 768 ms before to a second after), each with its wall time. Stops taking more at `cap` samples (2 hours) and says so.
 struct Tape {
     var cap = 16000 * 3600 * 2
     private(set) var pcm: [Int16] = []
     private(set) var clock = ClockMap()
     private(set) var full = false
-    private var held: (x: [Float], ms: Double)?  // the last quiet chunk, the onset of what may come
+    private var held: [(x: [Float], ms: Double)] = []  // the last quiet chunks, the onset of what may come (voice detection is a little late)
     private var after = 0  // quiet chunks still kept after speech
 
     var seconds: Double { Double(pcm.count) / 16000 }
@@ -1127,13 +1154,13 @@ struct Tape {
     /// The next chunk of this speaker's stream (`ms`: its wall time), and whether it holds speech.
     mutating func add(_ x: [Float], ms: Double, speech: Bool) {
         if speech {
-            if let h = held { append(h.x, h.ms) }
-            held = nil; after = 4
+            for h in held { append(h.x, h.ms) }
+            held = []; after = 4
             append(x, ms)
         } else if after > 0 {
             after -= 1; append(x, ms)
         } else {
-            held = (x, ms)
+            held = Array((held + [(x, ms)]).suffix(3))
         }
     }
 
@@ -1144,7 +1171,6 @@ struct Tape {
     }
 
     var floats: [Float] { pcm.map { Float($0) / 32767 } }
-    func floats(_ r: Range<Int>) -> [Float] { pcm[r].map { Float($0) / 32767 } }
 }
 
 /// Whether a piece of the microphone is the speakers' sound coming back: it follows the system audio closely at some delay. `ref` is the
@@ -1167,36 +1193,9 @@ func echoLike(_ mic: [Float], _ ref: [Float], maxLag: Int, step: Int = 32) -> Bo
     return best >= 0.75
 }
 
-// MARK: the second pass after a call: the whole recording again, with full context and better speaker labels
+// MARK: after a call: the other side's voices told apart again over the whole call
 
-/// Lines from a pass over part of a tape (from tape sample `from`), on the wall clock.
-func tapeLines(_ tokens: [Segment], src: String, part: Int, clock: ClockMap, from: Int = 0) -> [Line] {
-    sentences(tokens).compactMap { s in
-        guard junk.firstMatch(in: s.text, range: NSRange(location: 0, length: (s.text as NSString).length)) == nil else { return nil }
-        let t = Int(clock.ms(from + Int(s.start * clock.rate)))
-        return Line(t: t, src: src, text: s.text, part: part, final: true, w: t)
-    }
-}
-
-/// How the pass after a call goes through a tape: its stretches of speech, neighbours (less than `gap` ms apart) together up to `most`
-/// samples, so each pass has context and one speaker's turn, and a language change at a turn does not bleed into the next. A stretch
-/// longer than that is a pass of its own (the model cuts it at pauses).
-func tapeGroups(_ tape: Tape, most: Int = 16000 * 14, gap: Double = 3000) -> [Range<Int>] {
-    let a = tape.clock.anchors
-    var out: [Range<Int>] = []
-    for (i, s) in a.enumerated() {
-        let end = i + 1 < a.count ? a[i + 1].sample : tape.pcm.count
-        guard end > s.sample else { continue }
-        if let last = out.last, end - last.lowerBound <= most, s.ms - tape.clock.ms(last.upperBound - 1) <= gap {
-            out[out.count - 1] = last.lowerBound..<end
-        } else {
-            out.append(s.sample..<end)
-        }
-    }
-    return out
-}
-
-/// Which live voice each voice of the second pass is: the one most of its live lines had. Live lines the call window named count too
+/// Which live voice each voice told apart after the call is: the one most of its live lines had. Live lines the call window named count too
 /// ("@Oleg"). A voice with too few lines, or no clear winner, stays new.
 func carryVoices(live: [Line], turns: [Turn]) -> [String: String] {
     var votes: [String: [String: Int]] = [:]
@@ -1208,26 +1207,6 @@ func carryVoices(live: [Line], turns: [Turn]) -> [String: String] {
         let total = v.values.reduce(0, +)
         guard let top = v.max(by: { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) }), top.value >= 2, top.value * 10 >= total * 6 else { return nil }
         return top.key
-    }
-}
-
-/// The second pass replaces the live transcript of a recording only when it did not lose text: per speaker at least 70% of the live text
-/// (live text of less than 40 characters does not count).
-func polishKeeps(live: [Line], fresh: [Line]) -> Bool {
-    for src in ["mic", "sys"] {
-        let a = live.filter { $0.src == src }.map(\.text.count).reduce(0, +), b = fresh.filter { $0.src == src }.map(\.text.count).reduce(0, +)
-        if a >= 40 && b * 10 < a * 7 { return false }
-    }
-    return true
-}
-
-/// Fresh lines without the ones the user deleted while recording: same speaker, within 2 s, mostly the same words.
-func withoutDeleted(_ fresh: [Line], _ deleted: [Line]) -> [Line] {
-    fresh.filter { f in
-        !deleted.contains { d in
-            let a = words(d.text), b = words(f.text)
-            return d.src == f.src && abs(d.t - f.t) <= 2000 && !a.isEmpty && Double(commonRun(a, b)) >= 0.5 * Double(max(a.count, b.count))
-        }
     }
 }
 

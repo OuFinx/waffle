@@ -306,7 +306,7 @@ assert(back.anchors.map(\.sample) == [0, 8000] && back.ms(16000) == 9500)  // an
 // the tape keeps speech with a little around it, timed on the wall clock across the quiet it leaves out
 var tapeRec = Tape()
 for k in 0..<20 { tapeRec.add([Float](repeating: k < 3 || (k > 8 && k < 11) ? 0.5 : 0, count: 4096), ms: Double(k) * 256, speech: k < 3 || (k > 8 && k < 11)) }
-assert(tapeRec.pcm.count == 4096 * (3 + 4 + 1 + 2 + 4) && tapeRec.clock.ms(4096 * 7) == 8 * 256 && tapeRec.clock.ms(4096 * 8) == 9 * 256, "\(tapeRec.pcm.count) \(tapeRec.clock.anchors)")
+assert(tapeRec.pcm.count == 4096 * (3 + 4 + 2 + 2 + 4) && tapeRec.clock.ms(4096 * 7) == 7 * 256 && tapeRec.clock.ms(4096 * 9) == 9 * 256, "\(tapeRec.pcm.count) \(tapeRec.clock.anchors)")
 var small = Tape(); small.cap = 5000
 small.add([Float](repeating: 0.1, count: 4096), ms: 0, speech: true); small.add([Float](repeating: 0.1, count: 4096), ms: 256, speech: true)
 assert(small.pcm.count == 4096 && small.full)
@@ -318,10 +318,18 @@ let ref = noise(4096 + 4800), voice = noise(4096)
 assert(echoLike(Array(ref[(4800 - 3200)..<(4800 - 3200 + 4096)]).map { $0 * 0.4 }, ref, maxLag: 4800))  // their sound, 200 ms later, quieter
 assert(!echoLike(voice, ref, maxLag: 4800) && !echoLike([Float](repeating: 0, count: 4096), ref, maxLag: 4800))
 
-// quiet audio is brought up for the recognizer, loud audio down, without clipping
-let soft = (0..<16000).map { Float(sin(Double($0) / 10)) * 0.003 }
+// quiet audio is brought up for the recognizer, loud audio down, without clipping; a quiet person after a loud one is brought up too,
+// and the quiet between words stays quiet
+func tone(_ n: Int, _ a: Float) -> [Float] { (0..<n).map { Float(sin(Double($0) / 10)) * a } }
+func peakOf(_ x: ArraySlice<Float>) -> Float { x.map(abs).max()! }
+let soft = tone(8000, 0.003) + [Float](repeating: 0, count: 8000) + tone(8000, 0.003)  // speech with a pause
 let up = leveled(soft), down = leveled(soft.map { $0 * 300 })
-assert(abs(up.map(abs).max()! - 0.09) < 0.005 && down.map(abs).max()! <= 0.99 && leveled([Float](repeating: 0, count: 2000)) == [Float](repeating: 0, count: 2000))
+assert(abs(peakOf(up[2000..<6000]) - 0.09) < 0.005 && peakOf(down[...]) <= 0.99, "\(peakOf(up[2000..<6000]))")
+assert(leveled([Float](repeating: 0, count: 2000)) == [Float](repeating: 0, count: 2000))
+let pair = leveled(tone(32000, 0.05) + tone(32000, 0.0008))
+assert(peakOf(pair[44000..<60000]) > 0.02, "\(peakOf(pair[44000..<60000]))")  // the quiet one brought up 30 times, not left 50 times quieter
+let gaps = leveled(tone(16000, 0.03) + (0..<32000).map { _ in Float.random(in: -0.003...0.003) } + tone(16000, 0.03))
+assert(peakOf(gaps[24000..<40000]) < 0.05, "\(peakOf(gaps[24000..<40000]))")  // the noise between stays under a quarter of speech
 
 // which app holds the microphone
 assert(callAppName(bundle: "com.google.Chrome.helper", path: "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper", name: "Google Chrome Helper") == "Google Chrome")
@@ -329,21 +337,10 @@ assert(callAppName(bundle: "com.apple.avconferenced", path: "/usr/libexec/avconf
 assert(callAppName(bundle: "com.apple.corespeechd", path: "", name: nil) == nil && callAppName(bundle: "com.superduper.superwhisper", path: "/Applications/superwhisper.app/Contents/MacOS/superwhisper", name: "superwhisper") == nil)
 assert(callAppName(bundle: "us.zoom.xos", path: "/Applications/zoom.us.app/Contents/MacOS/zoom.us", name: "zoom.us") == "zoom.us")
 
-// the second pass: lines on the wall clock, live voices carried over, nothing lost, deleted lines stay deleted
-var tape = ClockMap(); tape.mark(sample: 0, ms: 10_000); tape.mark(sample: 16000 * 5, ms: 60_000)
-let polished = tapeLines([(0.5, 1, " Hello"), (1, 1.5, " there."), (6, 7, " After"), (7, 7.5, " the"), (7.5, 8, " gap.")], src: "sys", part: 2, clock: tape)
-assert(polished.map(\.t) == [10_500, 61_000] && polished.map(\.text) == ["Hello there.", "After the gap."] && polished.allSatisfy { $0.part == 2 && $0.final })
-assert(tapeLines([(0.5, 1, " Later.")], src: "sys", part: 2, clock: tape, from: 16000 * 5).map(\.t) == [60_500])
-// stretches of speech close together go through the second pass together, up to 14 s; far apart or too long, alone
-var groups = Tape()
-for (k, ms) in [0.0, 256, 512, 3000, 3256, 20000, 20256].enumerated() { _ = k; groups.add([Float](repeating: 0.2, count: 4096), ms: ms, speech: true) }
-assert(tapeGroups(groups).count == 2 && tapeGroups(groups, gap: 1000).count == 3 && tapeGroups(groups, most: 4096 * 2).count == 3, "\(tapeGroups(groups))")
+// after the call: the voices told apart again carry the live voices' names
 func spoke(_ t: Int, _ spk: String) -> Line { var l = line(t, "sys", "Something said here."); l.spk = spk; return l }
 let liveVoices = [spoke(1000, "2-1"), spoke(3000, "2-1"), spoke(5000, "@Oleg"), spoke(21000, "2-2"), spoke(23000, "2-2"), spoke(40000, "2-3")]
 assert(carryVoices(live: liveVoices, turns: [Turn(start: 0, end: 10000, spk: "a"), Turn(start: 20000, end: 30000, spk: "b"), Turn(start: 39000, end: 41000, spk: "c")]) == ["a": "2-1", "b": "2-2"])
-assert(polishKeeps(live: [line(0, "mic", String(repeating: "word ", count: 20))], fresh: [line(0, "mic", String(repeating: "word ", count: 15))]))
-assert(!polishKeeps(live: [line(0, "mic", String(repeating: "word ", count: 20))], fresh: [line(0, "mic", "word word")]))
-assert(withoutDeleted([line(1000, "mic", "Delete this line please."), line(1500, "sys", "Delete this line please.")], [line(500, "mic", "Delete this line, please")]).map(\.src) == ["sys"])
 assert(oneOnOne(invited: ["Oleg Petrenko"], voices: ["2-1"]) == ["2-1": "Oleg Petrenko"] && oneOnOne(invited: ["A", "B"], voices: ["2-1"]).isEmpty)
 
 print("ok")
