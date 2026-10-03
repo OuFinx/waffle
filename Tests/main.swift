@@ -309,6 +309,10 @@ assert(lastPass.ctx > 0 && lastPass.voiced > 16000 * 3, "\(lastPass.ctx) \(lastP
 assert(tw.thin(lastPass, Array(speechWords.prefix(2))) && !tw.thin(lastPass, speechWords) && lastPass.bare.ctx == 0 && lastPass.bare.audio.count == lastPass.audio.count - lastPass.ctx)
 let bareWords: [Segment] = speechWords.map { ($0.start - ctxSeconds, $0.end - ctxSeconds, $0.text) }
 assert(tw.words(lastPass.bare, bareWords) == 20)
+tw.forgetContext(lastPass)
+var after: [Pass] = []
+for _ in 0..<12 { let ps = tw.push([Float](repeating: 0, count: 4096), speech: true); after += ps; for p in ps { _ = tw.done(p, nil) } }
+assert(!after.isEmpty && after.allSatisfy { $0.ctx == 0 })  // the window goes on without the context
 
 // wall time from the audio's own clock: a gap is a jump, a little jitter is not
 var clock = ClockMap()

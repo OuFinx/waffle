@@ -58,7 +58,7 @@ func live(_ audio: [Float], trace: Bool = false) async throws -> (text: String, 
             if w.thin(p, tokens) {  // as Source.run: too few words for the speech, try without the context
                 let bare = try await Engine.shared.transcribe(p.bare.audio)
                 if trace { print("      thin pass, without context: " + bare.map(\.text).joined()) }
-                if w.words(p.bare, bare) > Int(Double(w.words(p, tokens)) * 1.3) { p = p.bare; tokens = bare }
+                if w.words(p.bare, bare) > Int(Double(w.words(p, tokens)) * 1.3) { w.forgetContext(p); p = p.bare; tokens = bare }
             }
             if trace { print(String(format: "      pass at %.1f s: %.1f s (%.1f context)%@: %@", t, Double(p.audio.count) / 16000, Double(p.ctx) / 16000, p.final ? " final" : "", tokens.map(\.text).joined())) }
             for e in w.done(p, tokens) {

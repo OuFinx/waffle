@@ -413,6 +413,7 @@ actor Source {
                     if let t = tokens, await self.thin(p, t), let bare = try? await Engine.shared.transcribe(p.bare.audio),
                        await self.words(p.bare, bare) > Int(Double(await self.words(p, t)) * 1.3) {
                         pass = p.bare; tokens = bare
+                        await self.forget(p)
                     }
                 } catch {
                     tokens = nil
@@ -425,6 +426,7 @@ actor Source {
 
     private func thin(_ p: Pass, _ t: [Segment]) -> Bool { windower.thin(p, t) }
     private func words(_ p: Pass, _ t: [Segment]) -> Int { windower.words(p, t) }
+    private func forget(_ p: Pass) { windower.forgetContext(p) }
 
     private func fail(_ e: Error) {
         guard !failed else { return }
