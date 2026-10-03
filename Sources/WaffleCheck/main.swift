@@ -50,6 +50,7 @@ func pad(_ x: [Float], _ seconds: Double) -> [Float] { quiet(Int(seconds * 16000
 func live(_ audio: [Float]) async throws -> (text: String, longest: Int, passes: Int, firstText: Double?) {
     let w = Windower()
     var state: VadStreamState?, speaking = false, lines: [Line] = [], waiting: [Pass] = [], longest = 0, passes = 0, firstText: Double?
+    var level = VoiceLevel()
     func run(_ ps: [Pass], at t: Double) async throws {
         for p in ps {
             longest = max(longest, p.audio.count); passes += 1
@@ -65,7 +66,7 @@ func live(_ audio: [Float]) async throws -> (text: String, longest: Int, passes:
         let x = Array(audio[i..<i + 4096])
         try await run(waiting, at: Double(i) / 16000)
         let p: Float
-        if let r = await Engine.shared.speech(x, state) { state = r.state; p = r.p } else { p = 0 }
+        if let r = await Engine.shared.speech(level.adjust(x).heard, state) { state = r.state; p = r.p } else { p = 0 }
         speaking = speaking ? p >= 0.35 : p >= 0.5
         waiting = w.push(x, speech: speaking)
         i += 4096
@@ -96,6 +97,16 @@ _ = try await Engine.shared.transcribe(quiet(16000))
 print(String(format: "models ready in %.0f s", Date().timeIntervalSince(started)))
 
 let have = voices()
+
+// A quiet speaker (-40 dB, a far-off mic) right after a loud one: still heard, live and whole.
+if have.contains("Samantha") {
+    let loud = try say("Samantha", 200, "Let us start with the release plan for next week.")
+    let soft = try say("Samantha", 200, "The database migration is blocked until Thursday.").map { $0 * 0.01 }
+    let lv = try await live(pad(loud + quiet(3000) + soft, 1))
+    let e = wer("Let us start with the release plan for next week. The database migration is blocked until Thursday.", lv.text)
+    print(String(format: "quiet after loud, live: %.0f%%: %@", e * 100, lv.text))
+    check(e <= 0.2, "a quiet speaker after a loud one is transcribed")
+}
 var longStream: [Float] = [], longText: [String] = [], longVoices: [(from: Int, to: Int, voice: String)] = []
 for s in samples {
     guard let voice = s.voices.first(where: have.contains) else { print("\(s.lang): no voice installed, skipped"); continue }

@@ -133,6 +133,17 @@ final class Engine: @unchecked Sendable {
     /// 15 s goes through the model in one pass; longer audio is cut at pauses and stitched (the pass after a call).
     func transcribe(_ samples: [Float]) async throws -> [Segment] {
         let a = try await ready()
+        let audio = leveled(samples)
+        let tokens = try await pass(a, audio)
+        // The decoder now and then gives up on audio it would read with a hair of difference (all blanks): a second of clear speech
+        // that comes back empty is tried again, with a little noise, then as it came.
+        guard tokens.isEmpty, samples.count >= 16000, speechLevel(audio) >= 0.02 else { return tokens }
+        log.info("empty pass on speech: trying again")
+        let again = try await pass(a, zip(audio, quiet(audio.count).map { $0 * 3 }).map { $0 + $1 })
+        return again.isEmpty ? try await pass(a, samples) : again
+    }
+
+    private func pass(_ a: AsrManager, _ samples: [Float]) async throws -> [Segment] {
         var audio = samples
         let least = 16000 / 2  // the model wants at least 0.3 s
         if audio.count < least { audio += quiet(least - audio.count) }
