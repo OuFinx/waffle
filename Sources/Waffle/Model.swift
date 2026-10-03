@@ -334,7 +334,7 @@ final class Model: ObservableObject {
         rec.onWindow = { [weak self] src, w, final, segs in self?.addWindow(id, src, w, final, segs) }
         rec.onHearing = { [weak self] src, on in
             guard let self, self.activeId == id else { return }
-            if on && !(src == "mic" && self.micMuted) { self.hearing.insert(src) } else { self.hearing.remove(src) }
+            if on && !(src == "mic" && (self.micMuted || self.callMuted)) { self.hearing.insert(src) } else { self.hearing.remove(src) }
         }
         rec.onError = { [weak self] in self?.fail($0) }
         rec.onTurns = { [weak self] new in self?.addTurns(id, new) }
@@ -475,11 +475,11 @@ final class Model: ObservableObject {
             let started = Date()
             var fresh: [Line] = []
             var ok = true
-            for (src, tape) in [("mic", tapes.mic), ("sys", tapes.sys)] where tape.seconds >= 1 && !tape.full {
+            for (src, tape) in [("mic", tapes.mic), ("sys", tapes.sys)] {
+                guard tape.seconds >= 1, !tape.full else { fresh += live.filter { $0.src == src }; continue }  // too little or too long to redo
                 guard let tokens = try? await Engine.shared.transcribe(tape.floats) else { ok = false; break }
                 fresh += tapeLines(tokens, src: src, part: part, clock: tape.clock)
             }
-            for (src, tape) in [("mic", tapes.mic), ("sys", tapes.sys)] where tape.full { fresh += live.filter { $0.src == src } }  // too long to redo
             var sysTurns: [Turn] = []
             if ok, tapes.sys.seconds >= 3, !tapes.sys.full {
                 let most = max(people, invited.count) > 0 ? max(people, invited.count) + 1 : nil
@@ -547,7 +547,8 @@ final class Model: ObservableObject {
                 Store.addSummary(id, notes)
                 let known = Store.allFolders()
                 var meta: [String: Any] = ["recording": false, "template": tpl.id, "tags": Set(Store.tags(id) + (folders ?? []).filter(known.contains)).sorted { $0.lowercased() < $1.lowercased() }]  // only existing folders
-                if let title, !title.isEmpty { meta["title"] = ["en": title] }
+                let planned = (Store.meta(id)["calendar"] as? [String: Any])?["title"] as? String ?? ""
+                if let title, !title.isEmpty, planned.isEmpty { meta["title"] = ["en": title] }  // the calendar's title is the one people know
                 Store.updateMeta(id, meta)
                 // Names Claude could tell from the conversation, for voices the user has not named.
                 let given = Store.speakers(id), shown = speakerNames(Store.lines(id), names: given)
