@@ -210,7 +210,7 @@ def run(bridge_path, mic, sys_, old=False, echo_gate=False, rms_vad=False):
                 g = br.cmd(f"C {src} 1 {b64(x)}"); take(g[1:], now); continue
             r = rms(x)  # as Source.process: each piece at one level for the voice model, the room's noise floor kept down
             floor[src] = 0.9 * floor[src] + 0.1 * r if r < floor[src] else min(floor[src] * 1.01, 0.05)
-            gain = min(20.0, 0.05 / max(r, 3 * floor[src], 0.0005))
+            gain = min(8.0 if src == "mic" else 20.0, 0.05 / max(r, 3 * floor[src], 0.0005))
             if rms_vad:
                 p = 1.0 if r > max(0.0015, floor[src] * 3) else 0.0
             else:

@@ -336,7 +336,7 @@ actor Source {
     private var fed = 0  // samples handed to the windows so far: the stream's sample count
     private var pending: [Float] = []
     private var vad: VadStreamState?
-    private var voiceLevel = VoiceLevel()
+    private lazy var voiceLevel = VoiceLevel(most: name == "mic" ? 8 : 20)
     private var speaking = false, hearing = false
     private var passes: Task<Void, Never>?  // the last recognition pass; each waits for the one before
     private var busy = false  // a piece is being worked on

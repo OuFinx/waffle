@@ -14,7 +14,9 @@ for f in encoder.int8.onnx decoder.int8.onnx joiner.int8.onnx tokens.txt; do
 done
 [ -f "$ROOT/models/vad/silero.onnx" ] || curl -sSL -o "$ROOT/models/vad/silero.onnx" "$HF/onnx-community/silero-vad/resolve/main/onnx/model.onnx"
 for l in uk_ua en_us ru_ru pl_pl de_de; do [ -f "$ROOT/data/$l/refs.tsv" ] || WAFFLE_EVAL="$ROOT" "$ROOT/env/bin/python" fetch.py $l 80; done
-swiftc -O -swift-version 5 ../../Sources/Waffle/Logic.swift bridge.swift -o "$ROOT/bridge"
+mkdir -p "$ROOT/new"
+cp bridge.swift "$ROOT/new/main.swift"  # top-level code lives in main.swift
+swiftc -O -swift-version 5 ../../Sources/Waffle/Logic.swift "$ROOT/new/main.swift" -o "$ROOT/bridge"
 mkdir -p "$ROOT/old"
 git show 46e6ab8:Sources/Waffle/Logic.swift > "$ROOT/old/Logic.swift"
 cp old/bridge.swift "$ROOT/old/main.swift"

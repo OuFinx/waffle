@@ -98,11 +98,13 @@ final class Engine: @unchecked Sendable {
     private func load() async throws {
         let mine = locked { loading }
         let started = Date()
+        // Voice detection first: it is small, and until it is there speech is told by loudness, which misses far more.
+        let v = try? await VadManager(config: VadConfig(defaultThreshold: 0.5))
+        locked { if loading == mine { vad = v } }
         let models = try await AsrModels.load(from: AsrModels.defaultCacheDirectory(for: Self.asrVersion), version: Self.asrVersion)
         let a = AsrManager(config: .default)
         try await a.loadModels(models)
-        let v = try? await VadManager(config: VadConfig(defaultThreshold: 0.5))
-        locked { if loading == mine { asr = a; vad = v } }  // dropped while it loaded: not kept
+        locked { if loading == mine { asr = a } }  // dropped while it loaded: not kept
         // The first pass on the Neural Engine is slow; make it now rather than on the first words of the call.
         _ = try? await transcribe(quiet(16000))
         log.info("speech models ready in \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s")

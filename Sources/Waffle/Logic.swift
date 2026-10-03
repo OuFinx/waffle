@@ -1095,13 +1095,14 @@ func leveled(_ x: [Float], target: Float = 0.08, most: Float = 30, reach: Int = 
 /// recognizer still gets right, so it hears each 256 ms piece at one level, up to 20 times louder; what is not above the room's own
 /// noise (followed quickly down, slowly up) stays quiet.
 struct VoiceLevel {
+    var most: Float = 20  // the microphone has its own gain control (voice processing): less there
     private(set) var floor: Float = 0.001
 
     /// The piece as voice detection should hear it, and its loudness (RMS) as it came.
     mutating func adjust(_ x: [Float]) -> (heard: [Float], rms: Float) {
         let rms = (x.reduce(0) { $0 + $1 * $1 } / Float(max(1, x.count))).squareRoot()
         floor = rms < floor ? 0.9 * floor + 0.1 * rms : min(floor * 1.01, 0.05)
-        let gain = min(20, 0.05 / max(rms, 3 * floor, 0.0005))
+        let gain = min(most, 0.05 / max(rms, 3 * floor, 0.0005))
         return (abs(gain - 1) > 0.05 ? x.map { $0 * gain } : x, rms)
     }
 }
@@ -1204,19 +1205,22 @@ struct Tape {
     var floats: [Float] { pcm.map { Float($0) / 32767 } }
 }
 
-/// Whether a piece of the microphone is the speakers' sound coming back: it follows the system audio closely at some delay. `ref` is the
-/// system audio from `maxLag` samples before the mic piece to its end; checked at half the rate, every `step` samples of delay.
+/// Whether a piece of the microphone is the speakers' sound coming back: it follows the system audio closely at some delay, and the
+/// system audio is at least as loud (an echo is quieter than what made it). Faint echo counts too: the levelling for voice detection and
+/// the recognizer would bring it up into made-up words. `ref` is the system audio from `maxLag` samples before the mic piece to its
+/// end; checked at half the rate, every `step` samples of delay.
 func echoLike(_ mic: [Float], _ ref: [Float], maxLag: Int, step: Int = 32) -> Bool {
     guard mic.count >= 64, ref.count >= mic.count + maxLag else { return false }
     func energy(_ x: ArraySlice<Float>) -> Float { var e: Float = 0; var i = x.startIndex; while i < x.endIndex { e += x[i] * x[i]; i += 2 }; return e }
     let n = Float(mic.count / 2)
     let em = energy(mic[...])
-    guard (em / n).squareRoot() >= 0.0025 else { return false }
+    let micRms = (em / n).squareRoot()
+    guard micRms >= 0.0005 else { return false }
     var best: Float = 0
     for lag in stride(from: 0, through: maxLag, by: step) {
         let lo = maxLag - lag, seg = ref[lo..<(lo + mic.count)]
         let er = energy(seg)
-        guard (er / n).squareRoot() >= 0.01 else { continue }
+        guard (er / n).squareRoot() >= max(0.002, micRms * 0.8) else { continue }
         var dot: Float = 0, i = 0
         while i < mic.count { dot += mic[i] * seg[lo + i]; i += 2 }
         best = max(best, dot / (em * er).squareRoot())
