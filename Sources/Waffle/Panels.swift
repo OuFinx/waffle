@@ -195,6 +195,7 @@ final class Panels: NSObject {
     private var prompt: NSPanel?
     private var promptApps: Set<String> = []
     private var dismissedApps: Set<String> = []  // "not now" for these call apps until they release the mic
+    private var holding: [String: Date] = [:]  // since when each app holds the mic
     private var miniFor: String?  // meeting shown in the popup
     private var subs: Set<AnyCancellable> = []
 
@@ -226,7 +227,8 @@ final class Panels: NSObject {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [unowned self] _ in DispatchQueue.main.async { self.update() } }
         }
         model.$status.combineLatest(model.$activeId, model.$pinned, model.$callEnding).sink { [unowned self] _ in DispatchQueue.main.async { self.update() } }.store(in: &subs)
-        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [unowned self] _ in updatePrompt(model.watch()) }
+        // In the common modes: it also runs while a menu is open or a window is being resized.
+        RunLoop.main.add(Timer(timeInterval: 2, repeats: true) { [unowned self] _ in updatePrompt(model.watch()) }, forMode: .common)
     }
 
     /// While a meeting records: the popup when it is pinned, and the edge tab whenever neither the popup nor the main window is in view.
@@ -266,10 +268,15 @@ final class Panels: NSObject {
 
     // MARK: "record this call?" prompt
 
+    /// Offers to record once an app has held the mic for 4 s: a dictation app or a sound check that takes it for a moment is no call.
+    /// The speech models start loading then, so they are ready when Record is clicked.
     func updatePrompt(_ list: [String]) {
-        let apps = Set(list)
-        if apps.isEmpty { dismissedApps = [] }
+        let now = Date()
+        holding = Dictionary(uniqueKeysWithValues: list.map { ($0, holding[$0] ?? now) })
+        let apps = Set(list.filter { now.timeIntervalSince(holding[$0]!) >= 4 })
+        if list.isEmpty { dismissedApps = [] }
         guard !model.busy, !apps.isEmpty, !apps.isSubset(of: dismissedApps) else { closePrompt(); return }
+        Engine.shared.prepare()
         if prompt == nil { showPrompt(apps.sorted()) }
     }
 

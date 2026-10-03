@@ -4,14 +4,15 @@ import AVFoundation
 import FluidAudio
 import SwiftUI
 
-enum SetupStep: Int, CaseIterable { case welcome, models, microphone, systemAudio, ai, done }
+enum SetupStep: Int, CaseIterable { case welcome, models, microphone, systemAudio, calendar, ai, done }
 
 struct SetupView: View {
     @EnvironmentObject var model: Model
     @StateObject var download = ModelDownload()
-    @State var step = SetupStep.welcome
+    @State var step = UserDefaults.standard.bool(forKey: "setupDone") ? SetupStep.models : .welcome  // shown again after an update: the new models
     @State var micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-    @State var screenAllowed = CGPreflightScreenCaptureAccess()
+    @State var audioStatus = SystemAudioPermission.status
+    @State var calendarAllowed = Agenda.allowed
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,6 +22,7 @@ struct SetupView: View {
                 case .models: models
                 case .microphone: microphone
                 case .systemAudio: systemAudio
+                case .calendar: calendar
                 case .ai: ai
                 case .done: done
                 }
@@ -36,7 +38,8 @@ struct SetupView: View {
         .task {  // permissions can change in System Settings while this is open
             while !Task.isCancelled {
                 micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-                screenAllowed = CGPreflightScreenCaptureAccess()
+                audioStatus = SystemAudioPermission.status
+                calendarAllowed = Agenda.allowed
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -57,7 +60,7 @@ struct SetupView: View {
     }
 
     var models: some View {
-        SetupPage(title: "Download the speech models", text: "Waffle recognises speech on your Mac, so it needs its models once: about 700 MB. They stay on this Mac.") {
+        SetupPage(title: "Download the speech models", text: "Waffle recognises speech on your Mac, so it needs its models once: about 750 MB. They stay on this Mac and run on its Neural Engine.") {
             HeroIcon(symbol: "arrow.down.circle.fill", colors: [.blue, .cyan])
         } content: {
             VStack(alignment: .leading, spacing: 12) {
@@ -85,18 +88,27 @@ struct SetupView: View {
     }
 
     var systemAudio: some View {
-        SetupPage(title: "Allow system audio", text: "So Waffle hears the other people in the call. macOS calls this Screen & System Audio Recording: Waffle records only the sound, and reads just the names in a Zoom or Teams window.") {
+        SetupPage(title: "Allow system audio", text: "So Waffle hears the other people in the call. macOS calls this System Audio Recording: Waffle gets the sound only, never the screen.") {
             HeroIcon(symbol: "speaker.wave.2.fill", colors: [.teal, .blue])
         } content: {
             VStack(alignment: .leading, spacing: 10) {
-                PermissionRow(granted: screenAllowed, denied: false, allow: "Allow System Audio",
+                PermissionRow(granted: audioStatus == .allowed, denied: audioStatus == .denied, allow: "Allow System Audio",
                               settings: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                    _ = CGRequestScreenCaptureAccess()
+                    SystemAudioPermission.request { _ in audioStatus = SystemAudioPermission.status }
                 }
-                if !screenAllowed {
-                    Text("After you switch Waffle on in System Settings, macOS may ask to quit and reopen it. Your setup continues where you left off.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                Text("In System Settings it is under Privacy & Security > Screen & System Audio Recording, in System Audio Recording Only.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    var calendar: some View {
+        SetupPage(title: "Use your calendar (optional)", text: "Waffle takes the meeting's title and the people invited from the event going on, so notes get the right title and names.") {
+            HeroIcon(symbol: "calendar", colors: [.red, .orange])
+        } content: {
+            PermissionRow(granted: calendarAllowed, denied: Agenda.denied, allow: "Allow Calendar",
+                          settings: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") {
+                Task { calendarAllowed = await Agenda.request() }
             }
         }
     }
@@ -253,60 +265,49 @@ struct PermissionRow: View {
 
 // MARK: download
 
-/// Downloads the speech model into <data>/models (unless the app already has it), then lets FluidAudio fetch the speaker model.
-final class ModelDownload: NSObject, ObservableObject, URLSessionDownloadDelegate {
+/// Downloads the models from Hugging Face once (FluidAudio keeps them in ~/Library/Application Support/FluidAudio): speech recognition,
+/// then voice detection and the speaker models. Removes the speech model of versions before 0.4.
+final class ModelDownload: ObservableObject {
     @Published var progress = 0.0
-    @Published var received: Int64 = 0
-    @Published var total: Int64 = 0
-    @Published var speechDone = Store.speechModel != nil
+    @Published var speechDetail = "Starting..."
+    @Published var speechDone = Engine.downloaded
     @Published var speakersDone = false
     @Published var error: String?
-    private var session: URLSession?
     private var started = false
 
     var allDone: Bool { speechDone && speakersDone }
-    var speechDetail: String {
-        total > 0 ? "\(received / 1_000_000) of \(total / 1_000_000) MB" : "Starting..."
-    }
 
     func start() {
         guard !started || error != nil else { return }
         started = true; error = nil
-        if speechDone { fetchSpeakers(); return }
-        let s = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
-        session = s
-        s.downloadTask(with: Store.speechModelURL).resume()
-    }
-
-    /// FluidAudio downloads its model the first time a diarizer is made; making one now saves the wait at the first meeting.
-    private func fetchSpeakers() {
         Task { @MainActor in
-            do { _ = try await LSEENDDiarizer(variant: .ami, stepSize: .step500ms); speakersDone = true }
-            catch { self.error = "Speaker model: \(error.localizedDescription)" }
+            do {
+                if !speechDone {
+                    _ = try await AsrModels.download(version: Engine.asrVersion) { [weak self] p in
+                        DispatchQueue.main.async {
+                            self?.progress = p.fractionCompleted
+                            switch p.phase {
+                            case .listing: self?.speechDetail = "Starting..."
+                            case .downloading: self?.speechDetail = "\(Int(p.fractionCompleted * 100))%"
+                            case .compiling: self?.speechDetail = "Preparing for this Mac..."
+                            }
+                        }
+                    }
+                    speechDone = true
+                    try? FileManager.default.removeItem(at: Store.oldModels)
+                }
+            } catch {
+                self.error = "Speech model: \(error.localizedDescription)"
+                return
+            }
+            do {
+                _ = try await VadManager(config: .default)
+                _ = try await LSEENDDiarizer(variant: .ami, stepSize: .step500ms)
+                try await OfflineDiarizerManager().prepareModels()
+                speakersDone = true
+            } catch {
+                self.error = "Speaker models: \(error.localizedDescription)"
+            }
         }
-    }
-
-    func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask, didWriteData _: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        received = totalBytesWritten; total = totalBytesExpectedToWrite
-        progress = totalBytesExpectedToWrite > 0 ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) : 0
-    }
-
-    /// The temporary file is gone once this returns, so move it here.
-    func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        let dest = Store.speechModelFile, fm = FileManager.default
-        if let code = (downloadTask.response as? HTTPURLResponse)?.statusCode, code != 200 { error = "Download failed (HTTP \(code))"; return }
-        do {
-            try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? fm.removeItem(at: dest)
-            try fm.moveItem(at: location, to: dest)
-            speechDone = true
-            fetchSpeakers()
-        } catch {
-            self.error = "Could not save the model: \(error.localizedDescription)"
-        }
-    }
-
-    func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError e: Error?) {
-        if let e { error = "Download stopped: \(e.localizedDescription)" }
     }
 }

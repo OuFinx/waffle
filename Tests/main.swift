@@ -7,12 +7,25 @@ func line(_ t: Int, _ src: String, _ text: String) -> Line { Line(t: t, src: src
 let echo = [line(1000, "sys", "Any other questions? No? Great, let's wrap up."), line(1200, "mic", "Any other questions?"), line(9000, "mic", "Yes, I have a question about the release.")]
 assert(dropEcho(echo).map(\.text) == [echo[0].text, echo[2].text])
 assert(dropEcho([line(0, "sys", "The Port Amazo firewall upgrade is planned for October 7, from 7 to 9."), line(100, "mic", "The Port Amazo firewall upgrade is planned for October.")]).count == 1)
+// short answers are mine, not echoes, even when "Them" said the same word a moment before or after
+for (them, me) in [("Yes, I can hear you.", "Can you hear me?"), ("Okay, so let's start with the release.", "Okay."), ("Is it done? Yes, I think so.", "Yes."),
+                   ("No, we didn't ship it yet.", "No, no, no."), ("It makes sense to me.", "Makes sense."), ("Right, exactly what Oleg said.", "Right, exactly."),
+                   ("Я згоден з Олегом.", "Я згоден."), ("Let's do Monday then.", "Let's do Monday.")] {
+    assert(dropEcho([line(0, "sys", them), line(3000, "mic", me)]).count == 2, me)
+}
+// my words that they repeat later stay mine; a short echo right at their line's start goes
+assert(dropEcho([line(0, "mic", "The code is four seven one nine."), line(9000, "sys", "The code is four seven one nine, got it.")]).count == 2)
+assert(dropEcho([line(5000, "sys", "Great, thanks everyone."), line(5200, "mic", "Great.")]).count == 1)
+assert(dropEcho([line(0, "sys", "Line number 4 about topic 4."), line(7000, "mic", "Line number 3 about topic 3.")]).count == 2)  // 7 s later: not an echo
 
 // one sentence per line, a sentence spread over segments is joined, timing follows the text position
 let sent = splitSentences([(0.0, 4.0, " Hello there. How are"), (4.0, 6.0, " you today? Fine, Cry"), (6.0, 7.0, "ptic.")])
 assert(sent.map(\.1) == ["Hello there.", "How are you today?", "Fine, Cryptic."], "\(sent)")
 assert(sent[0].0 < 300 && 1000 < sent[1].0 && sent[1].0 < 4000 && sent[2].0 >= 4000, "\(sent)")
-assert(splitSentences([(0, 2, " Thanks for watching!")]).isEmpty && splitSentences([]).isEmpty)
+assert(splitSentences([(0, 2, " Thank you.")]).map(\.1) == ["Thank you."] && splitSentences([(0, 2, " [music]")]).isEmpty && splitSentences([]).isEmpty)  // real speech stays
+assert(splitSentences([(0, 2, " Включи субтитры, пожалуйста. (Laughs) okay, fine (really).")]).map(\.1) == ["Включи субтитры, пожалуйста.", "(Laughs) okay, fine (really)."])
+assert(splitSentences([(0, 4, " Mr. Smith joins at 3 p.m. tomorrow. J. R. Smith too. Done!")]).map(\.1) == ["Mr. Smith joins at 3 p.m. tomorrow.", "J. R. Smith too.", "Done!"])
+assert(splitSentences([(0, 2, " Τι ώρα είναι; Είναι τρεις.")]).map(\.1) == ["Τι ώρα είναι;", "Είναι τρεις."] && splitSentences([(0, 2, " Wait; what.")]).count == 1)
 assert(splitSentences([(0, 2, " 🎵")]).isEmpty && splitSentences([(0, 2, " 🎵 Hello.")]).map(\.1) == ["🎵 Hello."])  // music marks alone are dropped
 
 let s = parseSummary("TITLE: Redis Incident\nFOLDERS: Incidents, CAB\n# Redis\n- down")
@@ -30,12 +43,12 @@ assert(lines.map(\.text) == ["Hi.", "Hello world.", "Next one"], "\(lines)")
 // passes over a long transcript only re-check the lines near the new ones, and end up the same as checking everything
 var long: [Line] = [], full: [Line] = []
 for k in 0..<120 {
-    let w = k * 7000, src = k % 3 == 0 ? "mic" : "sys"
-    let text = k % 9 == 0 ? "We ship the release on Monday at ten." : "Line number \(k) about topic \(k % 5)."
+    let w = k * 7000 + (k % 4 == 1 ? -6800 : 0), src = k % 4 == 1 ? "mic" : "sys"  // every 4th line, the mic echoes the line before
+    let text = k % 4 == 1 ? "Line number \(k - 1) about topic \((k - 1) % 5)." : "Line number \(k) about topic \(k % 5)."
     long = replaceWindow(long, src: src, w: w, part: 1, final: true, segments: [(0, 2, text)])
     full = dropEcho((full + [Line(t: w, src: src, text: text, part: 1, final: true, w: w)]).sorted { $0.t < $1.t })
 }
-assert(long == full && long.count < 120, "\(long.count) \(full.count)")
+assert(long == full && long.count == 90, "\(long.count) \(full.count)")
 assert(firstIndex(5) { $0 >= 3 } == 3 && firstIndex(5) { _ in false } == 5 && firstIndex(0) { _ in true } == 0)
 
 // a summary prompt is the fixed rules, the template, then the fixed title / folders / speakers layout
@@ -62,6 +75,10 @@ assert(sentences([(0, 1, " v1."), (1, 2, "2 is out.")]).count == 1)  // "v1.2" i
 assert(lockableSentences(ss, audioEnd: 5) == 2)
 assert(lockableSentences(ss, audioEnd: 2.5) == 1)  // the second ends too close to the edge
 assert(lockableSentences(Array(ss.prefix(1)), audioEnd: 5) == 0)  // the only sentence may still grow
+assert(lockableSentences(ss, previous: ["Hello there.", "How are you?"], audioEnd: 5) == 2 && lockableSentences(ss, previous: ["Hello there.", "How old are you?"], audioEnd: 5) == 1)
+assert(lockableSentences(ss, previous: [], audioEnd: 5) == 0)  // the first pass of a window locks nothing
+assert(sentences([(0, 1, " Mr."), (1, 2, " Smith"), (2, 3, " left.")]).map(\.text) == ["Mr. Smith left."] && ss[1].start == 1.0)
+assert(forcedCut([(0, 1, " a"), (1.1, 2, " b"), (3, 4, " c"), (4.1, 5, "d")], from: 0.5, to: 4.5) == 2)  // the widest pause, before a word
 
 // each "Them" line gets the voice that overlaps it most; "Me" lines and uncovered lines are left alone
 let talk = [Line(t: 0, src: "sys", text: "Hi.", part: 1, final: true, w: 0), Line(t: 2000, src: "mic", text: "Hello.", part: 1, final: true, w: 0),
@@ -81,6 +98,9 @@ assert(transcriptCopy(labelled, names: ["1-2": "Oleg"]) == "Speaker 1: Hi.\nMe: 
 assert(transcriptCopy([line(0, "mic", "One."), line(1, "mic", "Two."), line(2, "sys", "Three.")]) == "Me: One. Two.\nThem: Three." && transcriptCopy([]) == "")
 // names from the call window: who talks, who is there, which voice is whom
 assert(personName("Oleg Petrenko (Host)") == "Oleg Petrenko" && personName("Олег Петренко, muted") == "Олег Петренко" && personName("Maryna O'Neil-Koval") == "Maryna O'Neil-Koval")
+assert(personName("Petrenko, Oleg") == "Oleg Petrenko" && personName("Petrenko, Oleg (Guest)") == "Oleg Petrenko" && personName("Oleg Petrenko, Maryna Koval") == "Oleg Petrenko")
+assert(selfName(["Maryna Koval", "Oleg Petrenko (Host, me)"]) == "Oleg Petrenko" && selfName(["Oleg Petrenko (You)"]) == "Oleg Petrenko" && selfName(["Олег (Я)"]) == "Олег" && selfName(["Maryna (Host)"]) == nil)
+assert(speakingNames(["Олег не говорить", "Oleg is not talking"]).isEmpty)
 assert(personName("Share Screen") == nil && personName("Oleg") == nil && personName("Oleg", minWords: 1) == "Oleg" && personName("room 42 B") == nil && personName("Leave") == nil)
 assert(speakingNames(["Talking: Oleg Petrenko", "Maryna Koval is speaking", "Ivan, speaking", "Anna Bell (speaking)", "Говорить: Олег", "Not speaking", "Mute"]) == ["Oleg Petrenko", "Maryna Koval", "Ivan", "Anna Bell", "Олег"], "\(speakingNames(["Talking: Oleg Petrenko", "Maryna Koval is speaking", "Ivan, speaking", "Anna Bell (speaking)", "Говорить: Олег", "Not speaking", "Mute"]))")
 assert(speakingNames(["You are speaking", "Speaking", "Oleg Petrenko"]).isEmpty)
@@ -90,7 +110,10 @@ let screenTurns = [Turn(start: 0, end: 10000, spk: "1-1"), Turn(start: 10000, en
 let shown: [(t: Int, name: String)] = [(1000, "Oleg"), (4000, "Oleg"), (7000, "Oleg"), (9000, "Maryna"), (12000, "Maryna"), (15000, "Maryna"), (18000, "Maryna"), (22000, "Ivan"), (25000, "Ivan")]
 assert(screenSpeakers(screenTurns, shown) == ["1-1": "Oleg", "1-2": "Maryna"], "\(screenSpeakers(screenTurns, shown))")  // Ivan: only 2 looks
 assert(screenSpeakers(screenTurns.reversed(), shown) == ["1-1": "Oleg", "1-2": "Maryna"] && screenSpeakers([], shown).isEmpty)
-assert(screenSpeakers([Turn(start: 0, end: 9000, spk: "1-1"), Turn(start: 10000, end: 19000, spk: "1-2")], [(1000, "Oleg"), (2000, "Oleg"), (3000, "Oleg"), (11000, "Oleg"), (12000, "Oleg"), (13000, "Oleg")]).isEmpty)  // one name for two voices: neither
+let oleg3: [(t: Int, name: String)] = [(1000, "Oleg"), (2000, "Oleg"), (3000, "Oleg"), (11000, "Oleg"), (12000, "Oleg"), (13000, "Oleg")]
+assert(screenSpeakers([Turn(start: 0, end: 9000, spk: "1-1"), Turn(start: 10000, end: 19000, spk: "1-2")], oleg3) == ["1-1": "Oleg", "1-2": "Oleg"])  // one person, two voices
+assert(screenSpeakers([Turn(start: 0, end: 9000, spk: "1-1"), Turn(start: 10000, end: 19000, spk: "1-2"), Turn(start: 500, end: 3500, spk: "1-2")], oleg3).isEmpty)  // they talk at once: neither
+assert(settleNames([:], ["1-1": "Oleg", "1-2": "Oleg"]) == ["1-1": "Oleg", "1-2": "Oleg"])
 let bare = [line(1000, "sys", "Hi all."), line(6000, "sys", "Next."), line(20000, "sys", "Both?"), line(30000, "mic", "Me.")]
 let fromScreen = labelFromScreen(bare, [(1500, "Oleg"), (7000, "Maryna"), (20500, "Oleg"), (21000, "Maryna"), (30500, "Ivan")])
 assert(fromScreen.map(\.spk) == ["@Oleg", "@Maryna", nil, nil], "\(fromScreen.map(\.spk))")
@@ -177,5 +200,118 @@ assert(treeGuides("A/y/1", in: tree) == [false, true] && treeGuides("A/y/2", in:
 let wed = meetingDate("2026-09-30_12-00-00")
 assert(dayHeading(meetingDate("2026-09-30_08-00-00"), now: wed) == "Today" && dayHeading(meetingDate("2026-09-29_23-59-00"), now: wed) == "Yesterday")
 assert(dayHeading(meetingDate("2026-09-28_11-30-00"), now: wed) == "Monday, 28 Sep", dayHeading(meetingDate("2026-09-28_11-30-00"), now: wed))
+
+// the live windows: a made-up recognizer that knows when each word was said; whatever the window boundaries, every word ends up final
+// once, in order, sentences get locked while the speaker keeps talking, and no pass is longer than the model takes
+func speech(_ sentences: [String], from: Double, word: Double = 0.3, gap: Double = 0.05, pause: Double = 0.4) -> [(start: Int, end: Int, text: String)] {
+    var t = from, out: [(start: Int, end: Int, text: String)] = []
+    for s in sentences {
+        for w in s.split(separator: " ") { out.append((Int(t * 16000), Int((t + word) * 16000), " " + w)); t += word + gap }
+        t += pause
+    }
+    return out
+}
+let runOn = (0..<70).map { "w\($0)" }.joined(separator: " ")  // 24 s without a sentence end
+let script = speech(["Good morning everyone.", "Let us start with the release.", "It is blocked on the database.", "Oleg will rotate the credentials."], from: 1)
+    + speech(["Next topic is hiring.", "We have two candidates."], from: 15) + speech([runOn + "."], from: 22)
+func recognize(_ p: Pass) -> [Segment] {
+    let from = p.start - p.ctx, to = from + p.audio.count
+    return script.filter { $0.start >= from && $0.end <= to }.map { (Double($0.start - from) / 16000, Double($0.end - from) / 16000, $0.text) }
+}
+for delayed in [false, true] {
+    let win = Windower()
+    var shown: [Int: (final: Bool, text: String)] = [:], finals = 0, longest = 0, waiting: [Pass] = []
+    func take(_ e: [Emit]) {
+        for x in e {
+            if shown[x.start]?.final == true { assert(!x.final || x.segments.isEmpty, "a final window came back"); continue }
+            shown[x.start] = (x.final, x.segments.map(\.text).joined())
+            if x.final { finals += 1 }
+        }
+    }
+    func run(_ ps: [Pass]) { for p in ps { longest = max(longest, p.audio.count); take(win.done(p, recognize(p))) } }
+    let total = 16000 * 50
+    for c in stride(from: 0, to: total, by: 4096) {
+        let talking = script.contains { $0.start < c + 4096 && $0.end > c }
+        let ps = win.push([Float](repeating: talking ? 0.1 : 0, count: 4096), speech: talking)
+        if delayed { run(waiting); waiting = ps } else { run(ps) }
+    }
+    run(waiting); run(win.flush())
+    let text = shown.sorted { $0.key < $1.key }.map(\.value.text).joined()
+    assert(text == script.map(\.text).joined(), "delayed \(delayed): \(text)")
+    assert(shown.values.allSatisfy(\.final) && finals >= 5 && longest <= 240_000, "\(finals) \(longest)")
+}
+
+// the same with random speech: sentence lengths, pauses, missing sentence ends and late answers from the recognizer
+var rng: UInt64 = 42
+func rand(_ n: Int) -> Int { rng = rng &* 6364136223846793005 &+ 1442695040888963407; return Int((rng >> 33) % UInt64(n)) }
+for round in 0..<40 {
+    var said: [(start: Int, end: Int, text: String)] = [], t = 0.5 + Double(rand(20)) / 10
+    for k in 0..<(3 + rand(10)) {
+        let n = 1 + rand(round % 3 == 0 ? 60 : 14)
+        let words = (0..<n).map { "r\(round)s\(k)w\($0)" }.joined(separator: " ") + (rand(4) == 0 ? "" : ".")
+        let part = speech([words], from: t, word: 0.15 + Double(rand(30)) / 100, gap: Double(rand(25)) / 100, pause: 0)
+        said += part
+        t = Double(part.last!.end) / 16000 + [0.1, 0.3, 0.5, 0.9, 1.5, 3.0][rand(6)]
+    }
+    let win = Windower()
+    var shown: [Int: (final: Bool, text: String)] = [:], waiting: [[Pass]] = []
+    func take(_ e: [Emit]) {
+        for x in e where shown[x.start]?.final != true { shown[x.start] = (x.final, x.segments.map(\.text).joined()) }
+    }
+    func hear(_ p: Pass) -> [Segment] {
+        let from = p.start - p.ctx, to = from + p.audio.count
+        assert(p.audio.count <= 240_000)
+        return said.filter { $0.start >= from && $0.end <= to }.map { (Double($0.start - from) / 16000, Double($0.end - from) / 16000, $0.text) }
+    }
+    let delay = rand(3)
+    for c in stride(from: 0, to: Int((t + 3) * 16000), by: 4096) {
+        let talking = said.contains { $0.start < c + 4096 && $0.end > c }
+        waiting.append(win.push([Float](repeating: 0, count: 4096), speech: talking))
+        while waiting.count > delay { for p in waiting.removeFirst() { take(win.done(p, hear(p))) } }
+    }
+    for ps in waiting + [win.flush()] { for p in ps { take(win.done(p, hear(p))) } }
+    let text = shown.sorted { $0.key < $1.key }.map(\.value.text).joined()
+    assert(text == said.map(\.text).joined(), "round \(round): \(text)\nwanted \(said.map(\.text).joined())")
+}
+assert(Windower().push([Float](repeating: 0, count: 4096 * 100), speech: false).isEmpty)
+
+// wall time from the audio's own clock: a gap is a jump, a little jitter is not
+var clock = ClockMap()
+clock.mark(sample: 0, ms: 1000)
+assert(!clock.mark(sample: 16000, ms: 2100) && clock.ms(16000) == 2000 && clock.mark(sample: 32000, ms: 5000) && clock.ms(32000 + 8000) == 5500 && clock.ms(8000) == 1500)
+
+assert(clock.sample(5500) == 40000 && clock.sample(1500) == 8000)
+// the tape keeps speech with a little around it, timed on the wall clock across the quiet it leaves out
+var tapeRec = Tape()
+for k in 0..<20 { tapeRec.add([Float](repeating: k < 3 || (k > 8 && k < 11) ? 0.5 : 0, count: 4096), ms: Double(k) * 256, speech: k < 3 || (k > 8 && k < 11)) }
+assert(tapeRec.pcm.count == 4096 * (3 + 4 + 1 + 2 + 4) && tapeRec.clock.ms(4096 * 7) == 8 * 256 && tapeRec.clock.ms(4096 * 8) == 9 * 256, "\(tapeRec.pcm.count) \(tapeRec.clock.anchors)")
+var small = Tape(); small.cap = 5000
+small.add([Float](repeating: 0.1, count: 4096), ms: 0, speech: true); small.add([Float](repeating: 0.1, count: 4096), ms: 256, speech: true)
+assert(small.pcm.count == 4096 && small.full)
+
+// the mic hearing the speakers is echo; the user's own voice over it is not
+var seed: UInt64 = 7
+func noise(_ n: Int) -> [Float] { (0..<n).map { _ in seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Float(Int64(bitPattern: seed >> 11) % 2000) / 10000 - 0.1 } }
+let ref = noise(4096 + 4800), voice = noise(4096)
+assert(echoLike(Array(ref[(4800 - 3200)..<(4800 - 3200 + 4096)]).map { $0 * 0.4 }, ref, maxLag: 4800))  // their sound, 200 ms later, quieter
+assert(!echoLike(voice, ref, maxLag: 4800) && !echoLike([Float](repeating: 0, count: 4096), ref, maxLag: 4800))
+
+// which app holds the microphone
+assert(callAppName(bundle: "com.google.Chrome.helper", path: "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper", name: "Google Chrome Helper") == "Google Chrome")
+assert(callAppName(bundle: "com.apple.avconferenced", path: "/usr/libexec/avconferenced", name: nil) == "FaceTime" && callAppName(bundle: "com.apple.WebKit.GPU", path: "", name: nil) == "Safari")
+assert(callAppName(bundle: "com.apple.corespeechd", path: "", name: nil) == nil && callAppName(bundle: "com.superduper.superwhisper", path: "/Applications/superwhisper.app/Contents/MacOS/superwhisper", name: "superwhisper") == nil)
+assert(callAppName(bundle: "us.zoom.xos", path: "/Applications/zoom.us.app/Contents/MacOS/zoom.us", name: "zoom.us") == "zoom.us")
+
+// the second pass: lines on the wall clock, live voices carried over, nothing lost, deleted lines stay deleted
+var tape = ClockMap(); tape.mark(sample: 0, ms: 10_000); tape.mark(sample: 16000 * 5, ms: 60_000)
+let polished = tapeLines([(0.5, 1, " Hello"), (1, 1.5, " there."), (6, 7, " After"), (7, 7.5, " the"), (7.5, 8, " gap.")], src: "sys", part: 2, clock: tape)
+assert(polished.map(\.t) == [10_500, 61_000] && polished.map(\.text) == ["Hello there.", "After the gap."] && polished.allSatisfy { $0.part == 2 && $0.final })
+func spoke(_ t: Int, _ spk: String) -> Line { var l = line(t, "sys", "Something said here."); l.spk = spk; return l }
+let liveVoices = [spoke(1000, "2-1"), spoke(3000, "2-1"), spoke(5000, "@Oleg"), spoke(21000, "2-2"), spoke(23000, "2-2"), spoke(40000, "2-3")]
+assert(carryVoices(live: liveVoices, turns: [Turn(start: 0, end: 10000, spk: "a"), Turn(start: 20000, end: 30000, spk: "b"), Turn(start: 39000, end: 41000, spk: "c")]) == ["a": "2-1", "b": "2-2"])
+assert(polishKeeps(live: [line(0, "mic", String(repeating: "word ", count: 20))], fresh: [line(0, "mic", String(repeating: "word ", count: 15))]))
+assert(!polishKeeps(live: [line(0, "mic", String(repeating: "word ", count: 20))], fresh: [line(0, "mic", "word word")]))
+assert(withoutDeleted([line(1000, "mic", "Delete this line please."), line(1500, "sys", "Delete this line please.")], [line(500, "mic", "Delete this line, please")]).map(\.src) == ["sys"])
+assert(oneOnOne(invited: ["Oleg Petrenko"], voices: ["2-1"]) == ["2-1": "Oleg Petrenko"] && oneOnOne(invited: ["A", "B"], voices: ["2-1"]).isEmpty)
 
 print("ok")

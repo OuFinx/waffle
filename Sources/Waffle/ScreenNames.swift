@@ -1,18 +1,22 @@
-// Names from the call app's window (Zoom, Microsoft Teams) while a meeting records: who is in the call, and who is talking when the
-// app shows it. Read from the window's accessibility labels when Waffle is allowed (Privacy & Security > Accessibility), else from the
-// text in the window (Vision text recognition on a screenshot of that one window, which Screen & System Audio Recording covers).
+// Names from the call app's window (Zoom, Microsoft Teams, Google Meet in a browser) while a meeting records: who is in the call, who is
+// talking when the app shows it, which name is the user's, and whether Zoom has the user muted. Read from the window's accessibility
+// labels when Waffle is allowed (Privacy & Security > Accessibility), else from the text in the window (Vision text recognition on a
+// screenshot of that one window, when Screen & System Audio Recording is allowed). Only the app that is in the call is read.
 // Only the names are kept; screenshots never leave memory. Logic.swift turns the names into speaker labels.
 import ApplicationServices
 import ScreenCaptureKit
 import SwiftUI
 import Vision
 
-/// What the call window showed at one moment. t: epoch ms.
-struct ScreenLook { var t: Int; var people: [String]; var talking: [String] }
+/// What the call window showed at one moment. t: epoch ms. me: the user's own name, marked "(me)" or "(You)". muted: Zoom's Meeting
+/// menu offers to unmute (true) or to mute (false).
+struct ScreenLook { var t: Int; var people: [String]; var talking: [String]; var me: String? = nil; var muted: Bool? = nil }
 
 final class ScreenNames {
     /// The call apps this reads, by bundle id.
     static let apps: Set<String> = ["us.zoom.xos", "com.microsoft.teams2", "com.microsoft.teams"]
+    /// Browsers a Google Meet call can run in; their Meet window is read from a screenshot only.
+    static let browsers: Set<String> = ["com.google.Chrome", "com.apple.Safari", "company.thebrowser.Browser", "com.microsoft.edgemac", "com.brave.Browser", "org.mozilla.firefox"]
     /// Settings: on unless turned off.
     static var enabled: Bool {
         get { UserDefaults.standard.object(forKey: "screenNames") as? Bool ?? true }
@@ -35,24 +39,59 @@ final class ScreenNames {
         }
     }
 
-    /// A look still being read when this is called is dropped, so it can not land in the next recording.
-    func stop() { task?.cancel(); task = nil; onLook = { _ in } }
+    /// A look still being read when this is called is dropped, so it can not land in the next recording. The apps that were asked to
+    /// show their web content to accessibility go back to normal (it costs them CPU).
+    func stop() {
+        task?.cancel(); task = nil; onLook = { _ in }
+        for pid in opened { AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXManualAccessibility" as CFString, kCFBooleanFalse) }
+        opened = []
+    }
 
     private func look() async -> ScreenLook? {
-        let pids = NSWorkspace.shared.runningApplications.filter { Self.apps.contains($0.bundleIdentifier ?? "") }.map(\.processIdentifier)
-        guard !pids.isEmpty else { return nil }
-        var texts: [String] = [], framed: [String] = []
-        if AXIsProcessTrusted() { for pid in pids { texts += labels(pid) } }
+        // Only the app the call is in: with Teams open in the background of a Zoom call, Teams' chats are not people in the call.
+        // A recording started by hand, with no call app holding the mic, reads them all.
+        let calls = Set(callProcesses().map(\.name))
+        let running = NSWorkspace.shared.runningApplications
+        func inCall(_ a: NSRunningApplication) -> Bool { calls.isEmpty || calls.contains(a.localizedName ?? "") || calls.contains(a.bundleURL?.deletingPathExtension().lastPathComponent ?? "") }
+        let pids = running.filter { Self.apps.contains($0.bundleIdentifier ?? "") && inCall($0) }.map(\.processIdentifier)
+        let meet = calls.isEmpty ? [] : running.filter { Self.browsers.contains($0.bundleIdentifier ?? "") && inCall($0) }.map(\.processIdentifier)
+        guard !pids.isEmpty || !meet.isEmpty else { return nil }
+        var texts: [String] = [], framed: [String] = [], muted: Bool?
+        if AXIsProcessTrusted() {
+            for pid in pids { texts += labels(pid) }
+            for a in running where a.bundleIdentifier == "us.zoom.xos" && pids.contains(a.processIdentifier) { muted = zoomMuted(a.processIdentifier) ?? muted }
+        }
         // No one shown as talking in the labels (or no access to them): read the window, every 9 s at most. The app shows who talks
         // by a coloured frame, which only the screenshot has.
         let now = Date().timeIntervalSince1970
-        if speakingNames(texts).isEmpty && now - lastRead >= 9 {
+        if speakingNames(texts).isEmpty && now - lastRead >= 9 && CGPreflightScreenCaptureAccess() {
             lastRead = now
             for pid in pids { let r = await windowText(pid); texts += r.texts; framed += r.framed }
+            for pid in meet { let r = await windowText(pid, title: { $0.hasPrefix("Meet") || $0.contains("Google Meet") }); texts += r.texts; framed += r.framed }
         }
+        let me = selfName(texts)
         let talking = speakingNames(texts) + framed.filter { !speakingNames(texts).contains($0) }
-        let look = ScreenLook(t: Int(now * 1000), people: rosterNames(texts), talking: talking)
-        return look.people.isEmpty && look.talking.isEmpty ? nil : look
+        let look = ScreenLook(t: Int(now * 1000), people: rosterNames(texts), talking: talking, me: me, muted: muted)
+        return look.people.isEmpty && look.talking.isEmpty && muted == nil ? nil : look
+    }
+
+    /// Zoom's Meeting menu offers "Unmute audio" while the user is muted and "Mute audio" while not; nil outside a meeting.
+    private func zoomMuted(_ pid: pid_t) -> Bool? {
+        var bar: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(pid), kAXMenuBarAttribute as CFString, &bar) == .success, let bar else { return nil }
+        var stack: [(AXUIElement, Int)] = [(bar as! AXUIElement, 0)], visited = 0
+        while let next = stack.popLast(), visited < 600 {
+            visited += 1
+            let (e, depth) = next
+            var t: CFTypeRef?
+            if AXUIElementCopyAttributeValue(e, kAXTitleAttribute as CFString, &t) == .success, let title = (t as? String)?.lowercased() {
+                if title == "unmute audio" { return true }
+                if title == "mute audio" { return false }
+            }
+            var kids: CFTypeRef?
+            if depth < 4, AXUIElementCopyAttributeValue(e, kAXChildrenAttribute as CFString, &kids) == .success, let k = kids as? [AXUIElement] { stack += k.map { ($0, depth + 1) } }
+        }
+        return nil
     }
 
     /// Titles, descriptions and values in the app's windows, at most 3000 elements and one second.
@@ -79,14 +118,15 @@ final class ScreenNames {
         return out
     }
 
-    /// Text recognised in a screenshot of the app's biggest window on screen, and the names framed as talking.
-    private func windowText(_ pid: pid_t) async -> (texts: [String], framed: [String]) {
+    /// Text recognised in a screenshot of the app's biggest normal window on screen (whose title passes `title`), and the names framed
+    /// as talking.
+    private func windowText(_ pid: pid_t, title: (String) -> Bool = { _ in true }) async -> (texts: [String], framed: [String]) {
         guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true),
-              let w = content.windows.filter({ $0.owningApplication?.processID == pid && $0.frame.width >= 300 && $0.frame.height >= 200 })
+              let w = content.windows.filter({ $0.owningApplication?.processID == pid && $0.windowLayer == 0 && $0.frame.width >= 300 && $0.frame.height >= 200 && title($0.title ?? "") })
                 .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
         else { return ([], []) }
         let cfg = SCStreamConfiguration()
-        let scale = min(2, 1800 / w.frame.width)  // big enough for name labels, small enough to read fast
+        let scale = min(2, max(1, 1800 / w.frame.width))  // big enough for name labels and the thin talking frame, small enough to read fast
         cfg.width = Int(w.frame.width * scale); cfg.height = Int(w.frame.height * scale)
         cfg.showsCursor = false
         guard let image = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: w), configuration: cfg) else { return ([], []) }
