@@ -171,7 +171,12 @@ final class Recorder {
         }
         screen = s
         Task {
-            do { try await s.start(); self.sysQueue.async { self.sysRetries = 0 }; log.info("system audio: screen capture") } catch {
+            do {
+                try await s.start()
+                if self.isStopped { s.stop(); return }  // stopped while it started
+                self.sysQueue.async { self.sysRetries = 0 }
+                log.info("system audio: screen capture")
+            } catch {
                 log.error("screen capture failed: \(error.localizedDescription, privacy: .public)")
                 self.restartSystem()
             }
