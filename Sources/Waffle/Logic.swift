@@ -976,6 +976,12 @@ final class Windower {
         return own
     }
 
+    /// The context threw this window's pass off (see thin): the window goes on without it, so the next passes do not lose those words again.
+    func forgetContext(_ p: Pass) {
+        guard p.gen == gen, active, p.start == start, ctx > 0 else { return }
+        buf.removeFirst(ctx); ctx = 0
+    }
+
     /// How many of the pass's own words there are (to compare a pass with and without its context).
     func words(_ p: Pass, _ tokens: [Segment]) -> Int { wordSpans(mine(p, tokens)).count }
 
