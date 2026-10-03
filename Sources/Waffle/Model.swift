@@ -475,10 +475,12 @@ final class Model: ObservableObject {
             let started = Date()
             var fresh: [Line] = []
             var ok = true
-            for (src, tape) in [("mic", tapes.mic), ("sys", tapes.sys)] {
+            for (src, tape) in [("mic", tapes.mic), ("sys", tapes.sys)] where ok {
                 guard tape.seconds >= 1, !tape.full else { fresh += live.filter { $0.src == src }; continue }  // too little or too long to redo
-                guard let tokens = try? await Engine.shared.transcribe(tape.floats) else { ok = false; break }
-                fresh += tapeLines(tokens, src: src, part: part, clock: tape.clock)
+                for g in tapeGroups(tape) {
+                    guard let tokens = try? await Engine.shared.transcribe(tape.floats(g)) else { ok = false; break }
+                    fresh += tapeLines(tokens, src: src, part: part, clock: tape.clock, from: g.lowerBound)
+                }
             }
             var sysTurns: [Turn] = []
             if ok, tapes.sys.seconds >= 3, !tapes.sys.full {
@@ -488,6 +490,10 @@ final class Model: ObservableObject {
                 }
             }
             fresh = dropEcho(withoutDeleted(fresh, deleted).sorted { $0.t < $1.t })
+            // The whole-call speakers replace the live ones only when they tell at least as many voices apart (they can lump similar
+            // voices together on a short call, where the live labels did better).
+            let liveVoices = Set(live.compactMap { $0.src == "sys" ? $0.spk : nil }.filter { !$0.hasPrefix("@") })
+            if Set(sysTurns.map(\.spk)).count < max(1, liveVoices.count) { sysTurns = [] }
             if !sysTurns.isEmpty {
                 let carried = carryVoices(live: live, turns: sysTurns)
                 let turns = sysTurns.map { Turn(start: $0.start, end: $0.end, spk: carried[$0.spk] ?? "\(part)-\($0.spk)") }

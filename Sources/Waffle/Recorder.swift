@@ -40,7 +40,7 @@ final class Recorder {
         set { flags.withLock { $0.micOn = newValue } }
     }
     private let flags = Locked(Flags())
-    private struct Flags { var micOn = true; var stopped = false; var sysHeard = false }
+    private struct Flags { var micOn = true; var stopped = false; var sysHeard = false; var lastMic = 0.0, lastSys = 0.0 }  // last*: epoch ms where the audio captured so far ends
 
     private var mic: Source!, sys: Source!
     private var micIn: AsyncStream<Piece>.Continuation!, sysIn: AsyncStream<Piece>.Continuation!
@@ -66,7 +66,9 @@ final class Recorder {
         sysLoop = Task.detached(priority: .userInitiated) { [sys] in for await p in ss { await sys!.feed(p) } }
         micCapture.onAudio = { [weak self] buf, host in
             guard let self, self.micOn, let x = self.micResample.convert(buf) else { return }
-            self.micIn.yield(Piece(samples: x, ms: wallMs(host)))
+            let ms = wallMs(host)
+            self.flags.withLock { $0.lastMic = ms + Double(x.count) / 16 }
+            self.micIn.yield(Piece(samples: x, ms: ms))
         }
         micCapture.onError = { [weak self] in self?.error($0) }
     }
@@ -94,6 +96,7 @@ final class Recorder {
         if SystemAudioPermission.status == .unknown {  // never asked (the setup asks): ask now, before the tap is made
             _ = await withCheckedContinuation { c in SystemAudioPermission.request { c.resume(returning: $0) } }
         }
+        guard !isStopped else { return }
         sysQueue.async { self.startSystem() }
         listen()
 
@@ -142,7 +145,7 @@ final class Recorder {
             t.onAudio = { [weak self] in self?.sysAudio($0, $1) }
             do {
                 try t.start()
-                tap = t; sysRetries = 0
+                tap = t
                 log.info("system audio: process tap")
                 return
             } catch {
@@ -152,10 +155,25 @@ final class Recorder {
         startScreen()
     }
 
+    /// Sound from the screen capture that runs alongside a silent tap: the tap goes, this takes over.
+    private func screenAudio(_ buf: AVAudioPCMBuffer, _ host: UInt64?) {
+        if tap != nil, buf.floatChannelData.map({ d in (0..<Int(buf.frameLength)).contains { d[0][$0] != 0 } }) == true {
+            sysQueue.async { [self] in if let t = tap { log.info("screen capture brings sound: the tap goes"); t.stop(); tap = nil } }
+        }
+        if tap == nil { sysAudio(buf, host) }
+    }
+
     private func sysAudio(_ buf: AVAudioPCMBuffer, _ host: UInt64?) {
         guard let x = sysResample.convert(buf) else { return }
-        if !flags.withLock({ $0.sysHeard }), x.contains(where: { $0 != 0 }) { flags.withLock { $0.sysHeard = true } }
-        sysIn.yield(Piece(samples: x, ms: wallMs(host)))
+        let ms = wallMs(host)
+        let first = flags.withLock { f -> Bool in
+            f.lastSys = ms + Double(x.count) / 16
+            if f.sysHeard || !x.contains(where: { $0 != 0 }) { return false }
+            f.sysHeard = true
+            return true
+        }
+        if first { sysQueue.async { self.sysRetries = 0 } }  // it works: the next failure starts the backoff afresh
+        sysIn.yield(Piece(samples: x, ms: ms))
     }
 
     private func startScreen() {
@@ -164,7 +182,7 @@ final class Recorder {
             return
         }
         let s = SystemScreen()
-        s.onAudio = { [weak self] in self?.sysAudio($0, $1) }
+        s.onAudio = { [weak self] in self?.screenAudio($0, $1) }
         s.onStop = { [weak self] e in
             log.error("screen capture stopped: \(e.localizedDescription, privacy: .public)")
             self?.restartSystem()
@@ -173,9 +191,9 @@ final class Recorder {
         Task {
             do {
                 try await s.start()
-                if self.isStopped { s.stop(); return }  // stopped while it started
-                self.sysQueue.async { self.sysRetries = 0 }
-                log.info("system audio: screen capture")
+                self.sysQueue.async {
+                    if self.isStopped || self.screen !== s { s.stop() } else { log.info("system audio: screen capture") }  // stopped or replaced while it started
+                }
             } catch {
                 log.error("screen capture failed: \(error.localizedDescription, privacy: .public)")
                 self.restartSystem()
@@ -199,8 +217,10 @@ final class Recorder {
     private func tick() {
         guard !isStopped else { return }
         let now = Date().timeIntervalSince1970 * 1000
-        Task { await mic.idle(now); await sys.idle(now) }
-        if micOn, micCapture.silentFor > 3 {
+        let (m, s) = flags.withLock { ($0.lastMic, $0.lastSys) }
+        // No audio captured for 0.7 s (screen capture sends none while nothing plays; a muted mic sends none): finish the window.
+        Task { if now - m > 700 { await mic.idle() }; if now - s > 700 { await sys.idle() } }
+        if micOn, micCapture.running, micCapture.silentFor > 3 {
             log.error("microphone delivered nothing for 3 s: restarting it")
             micCapture.restart(after: 0, devicesChanged: true)
         }
@@ -209,10 +229,11 @@ final class Recorder {
             if t.silentFor > 3 {
                 log.error("process tap delivered nothing for 3 s: restarting it")
                 restartSystem()
-            } else if !flags.withLock({ $0.sysHeard }), Date().timeIntervalSince(sysStarted) > 20, !callApps().isEmpty {
-                // A call is on, yet the tap gave only digital silence for 20 s: macOS gives a tap without permission exactly that.
-                log.error("process tap is silent during a call: switching to screen capture")
-                tap?.stop(); tap = nil
+            } else if !flags.withLock({ $0.sysHeard }), Date().timeIntervalSince(sysStarted) > 20, SystemAudioPermission.status != .allowed,
+                      CGPreflightScreenCaptureAccess(), screen == nil, !callApps().isEmpty {
+                // A call is on, yet the tap gave only digital silence for 20 s and the permission is not known to be there: macOS gives a
+                // tap without it exactly that. Screen capture runs alongside; the tap goes once screen capture brings sound.
+                log.error("process tap is silent during a call: trying screen capture")
                 startScreen()
             }
         }
@@ -318,6 +339,7 @@ actor Source {
     private var floor: Float = 0.003  // the room's loudness when nobody speaks, for when the voice model is not loaded yet
     private var speaking = false, hearing = false
     private var passes: Task<Void, Never>?  // the last recognition pass; each waits for the one before
+    private var busy = false  // a piece is being worked on
     private var failed = false
     private var tape = Tape()
     // Recent audio for the echo check (system audio only): the pieces of the last 5 s, as they came.
@@ -333,6 +355,8 @@ actor Source {
     func setDiarizer(_ d: LSEENDDiarizer) { diarizer = d }
 
     func feed(_ p: Piece) async {
+        busy = true
+        defer { busy = false }
         if name == "sys" {
             recentPieces.append(p)
             while let f = recentPieces.first, p.ms - f.ms > 5000 { recentPieces.removeFirst() }
@@ -340,7 +364,7 @@ actor Source {
         let at = fed + pending.count
         if !clock.anchors.isEmpty, p.ms - clock.ms(at) > 300 {
             // Nothing came for a while (nothing played, the mic was muted, the Mac slept): the window before is done.
-            pending = []
+            await drain()
             run(windower.flush())
             clock.mark(sample: fed, ms: p.ms, tolerance: 0)
         } else {
@@ -404,21 +428,28 @@ actor Source {
         if hearing && !out.isEmpty { hearing = false; rec.hearing(name, false) }
     }
 
-    /// No audio for 0.7 s (screen capture sends none while nothing plays; a muted mic sends none): finish the window.
-    func idle(_ now: Double) {
-        guard !clock.anchors.isEmpty, now - clock.ms(fed + pending.count) > 700 else { return }
-        pending = []
+    /// No audio was captured for a while: what came is the end of it (the last bit padded to a chunk), the window is done. Not while a
+    /// piece is being worked on: then audio is coming, just slowly.
+    func idle() async {
+        guard !busy, !clock.anchors.isEmpty, windower.active || !pending.isEmpty else { return }
+        busy = true
+        await drain()
         run(windower.flush())
+        busy = false
         if hearing { hearing = false; rec.hearing(name, false) }
+    }
+
+    /// The audio short of a whole chunk, padded with room noise.
+    private func drain() async {
+        guard !pending.isEmpty else { return }
+        let x = pending + quiet(chunk - pending.count)
+        pending = []
+        await process(x)
     }
 
     /// The recording ends: the rest of the audio, the last window's text, the last speaker labels. Returns the tape.
     func finish() async -> Tape {
-        if !pending.isEmpty {
-            let n = pending.count
-            await process(pending + quiet(chunk - n))
-            pending = []
-        }
+        await drain()
         run(windower.flush())
         await passes?.value
         if let d = diarizer {
@@ -429,6 +460,7 @@ actor Source {
                 return try d.finalizeSession()
             }
             emit(u)
+            emit(u??.tentativeSegments)  // finalizeSession settles these after it returns: they are the last turns
             diarizer = nil
         }
         let t = tape
@@ -471,8 +503,10 @@ actor Source {
     }
 
     /// Diarizer segments -> turns on the wall clock. Voices are "1", "2"... for this recording.
-    private func emit(_ update: DiarizerTimelineUpdate??) {
-        guard let segs = update??.finalizedSegments, !segs.isEmpty else { return }
+    private func emit(_ update: DiarizerTimelineUpdate??) { emit(update??.finalizedSegments) }
+
+    private func emit(_ segments: [DiarizerSegment]?) {
+        guard let segs = segments, !segs.isEmpty else { return }
         rec.turns(segs.map { s in
             Turn(start: Int(diarClock.ms(Int(Double(s.startTime) * 16000))), end: Int(diarClock.ms(Int(Double(s.endTime) * 16000))), spk: String(s.speakerIndex + 1))
         })
@@ -498,10 +532,13 @@ final class MicCapture {
 
     /// Seconds since the last audio.
     var silentFor: TimeInterval { Date().timeIntervalSince(last.withLock { $0 }) }
+    /// Started and not given up (no microphone found): the watchdog may restart it.
+    var running: Bool { live.withLock { $0 } }
+    private let live = Locked(false)
     /// The sound goes to headphones (see headphonesInUse).
     var headphones: Bool { phones.withLock { $0 } }
 
-    func start() { q.async { self.last.withLock { $0 = Date() }; self.build() } }
+    func start() { q.async { self.last.withLock { $0 = Date() }; self.live.withLock { $0 = true }; self.build() } }
 
     /// Build the engine again after `after` seconds; calls in between count once.
     func restart(after: Double = 0.3, devicesChanged: Bool = false) {
@@ -518,7 +555,7 @@ final class MicCapture {
         }
     }
 
-    func stop() { q.sync { stopped = true; gen += 1; teardown() } }
+    func stop() { q.sync { stopped = true; gen += 1; live.withLock { $0 = false }; teardown() } }
 
     private func teardown() {
         if let o = observer { NotificationCenter.default.removeObserver(o); observer = nil }
@@ -540,7 +577,7 @@ final class MicCapture {
         }
         let fmt = input.outputFormat(forBus: 0)
         guard fmt.sampleRate > 0, fmt.channelCount > 0 else {  // a device is coming or going: look again in a moment
-            if tries < 10 { q.asyncAfter(deadline: .now() + 1) { [weak self] in self?.build(tries: tries + 1) } } else { onError("No microphone found") }
+            if tries < 10 { q.asyncAfter(deadline: .now() + 1) { [weak self] in self?.build(tries: tries + 1) } } else { live.withLock { $0 = false }; onError("No microphone found") }
             return
         }
         input.installTap(onBus: 0, bufferSize: 4096, format: fmt) { [weak self] buf, when in
@@ -728,6 +765,7 @@ final class SystemScreen: NSObject, SCStreamOutput, SCStreamDelegate {
     var onAudio: (AVAudioPCMBuffer, UInt64?) -> Void = { _, _ in }
     var onStop: (Error) -> Void = { _ in }
     private var stream: SCStream?
+    private var cancelled = false  // stopped before it finished starting
     private let q = DispatchQueue(label: "screen audio")
 
     func start() async throws {
@@ -745,9 +783,11 @@ final class SystemScreen: NSObject, SCStreamOutput, SCStreamDelegate {
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: q)  // ignored, avoids "dropping frame" log spam
         try await s.startCapture()
         stream = s
+        if cancelled { stop() }
     }
 
     func stop() {
+        cancelled = true
         guard let s = stream else { return }
         stream = nil
         try? s.removeStreamOutput(self, type: .audio)
