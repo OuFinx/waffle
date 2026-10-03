@@ -336,6 +336,8 @@ func noise(_ n: Int) -> [Float] { (0..<n).map { _ in seed = seed &* 636413622384
 let ref = noise(4096 + 4800), voice = noise(4096)
 assert(echoLike(Array(ref[(4800 - 3200)..<(4800 - 3200 + 4096)]).map { $0 * 0.4 }, ref, maxLag: 4800))  // their sound, 200 ms later, quieter
 assert(!echoLike(voice, ref, maxLag: 4800) && !echoLike([Float](repeating: 0, count: 4096), ref, maxLag: 4800))
+assert(echoLike(Array(ref[(4800 - 960)..<(4800 - 960 + 4096)]).map { $0 * 0.02 }, ref.map { $0 * 0.1 }, maxLag: 4800))  // faint echo of quiet sound
+assert(!echoLike(voice.map { $0 * 0.5 }, ref.map { $0 * 0.01 }, maxLag: 4800))  // the user loud over faint system audio
 
 // quiet audio is brought up for the recognizer, loud audio down, without clipping; a quiet person after a loud one is brought up too,
 // and the quiet between words stays quiet
