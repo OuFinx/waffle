@@ -78,27 +78,30 @@ final class Engine: @unchecked Sendable {
     }
 
     private func drop() {
-        let l: Task<Void, Error>? = locked {
+        // Everything goes in one step, so a load starting right after finds nothing half-dropped.
+        let gone: (Task<Void, Error>, AsrManager?)? = locked {
             guard users == 0, let l = loading else { return nil }
-            loading = nil
-            return l
+            let a = asr
+            loading = nil; asr = nil; vad = nil
+            return (l, a)
         }
-        guard let l else { return }
+        guard let gone else { return }
+        let (l, a) = gone
         Task.detached { [self] in
             _ = try? await l.value
-            let a = locked { () -> AsrManager? in let a = asr; asr = nil; vad = nil; return a }
-            await exclusive { await a?.cleanup() }
+            if let a, locked({ asr !== a }) { await exclusive { await a.cleanup() } }
             log.info("speech models unloaded")
         }
     }
 
     private func load() async throws {
+        let mine = locked { loading }
         let started = Date()
         let models = try await AsrModels.load(from: AsrModels.defaultCacheDirectory(for: Self.asrVersion), version: Self.asrVersion)
         let a = AsrManager(config: .default)
         try await a.loadModels(models)
         let v = try? await VadManager(config: VadConfig(defaultThreshold: 0.5))
-        locked { asr = a; vad = v }
+        locked { if loading == mine { asr = a; vad = v } }  // dropped while it loaded: not kept
         // The first pass on the Neural Engine is slow; make it now rather than on the first words of the call.
         _ = try? await transcribe(quiet(16000))
         log.info("speech models ready in \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s")
@@ -117,7 +120,10 @@ final class Engine: @unchecked Sendable {
             locked { loading = nil }
             throw error
         }
-        guard let loaded = locked({ asr }) else { throw NSError(domain: "Waffle", code: 2, userInfo: [NSLocalizedDescriptionKey: "The speech model did not load"]) }
+        guard let loaded = locked({ asr }) else {
+            locked { if loading == l { loading = nil } }  // let the next call load again
+            throw NSError(domain: "Waffle", code: 2, userInfo: [NSLocalizedDescriptionKey: "The speech model did not load"])
+        }
         return loaded
     }
 

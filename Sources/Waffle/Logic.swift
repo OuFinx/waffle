@@ -903,8 +903,9 @@ final class Windower {
     var pauseEnd = 16000 * 2         // a pause that ends any window
 
     private(set) var buf: [Float] = []  // context + window
-    private(set) var ctx = 0, start = 0, active = false
+    private(set) var ctx = 0, start = 0, active = false  // active: a window is open
     private var clock = 0, quiet = 0, since = 0, gen = 0, inFlight = false
+    private var ended = 0  // where the last window ended: audio before it was that window's, it can only be context now
     private var previous: [String]?  // the sentences of the last pass over this window, to lock only what two passes agree on
 
     /// Audio of this speaker, in order; `speech` is whether it holds speech. Returns the passes to run, in order.
@@ -915,7 +916,7 @@ final class Windower {
             if buf.count > ctxMax + preroll { buf.removeFirst(buf.count - ctxMax - preroll) }
             guard speech else { return [] }
             active = true
-            let lead = min(buf.count, preroll + chunk.count)
+            let lead = min(buf.count, preroll + chunk.count, clock - ended)
             ctx = buf.count - lead; start = clock - lead
             quiet = 0; since = lead; previous = nil
             return []
@@ -941,7 +942,7 @@ final class Windower {
 
     private func finish() -> Pass {
         let p = pass(final: true)
-        gen += 1; active = false; inFlight = false; previous = nil
+        gen += 1; active = false; inFlight = false; previous = nil; ended = clock
         buf = Array(buf.suffix(ctxMax))
         return p
     }
@@ -951,8 +952,13 @@ final class Windower {
         if !p.final && p.gen == gen { inFlight = false }
         guard let tokens else { return [] }
         let c = Double(p.ctx) / Double(rate)
-        // The context's words belong to the window before; a word straddling the edge stays with the one it starts in.
-        let own: [Segment] = tokens.filter { $0.start >= c - 0.08 }.map { (max(0, $0.start - c), max(0, $0.end - c), $0.text) }
+        // The context's words belong to the window before, whole: a word goes with the window it starts in, pieces and punctuation
+        // with it (token times move a little from pass to pass, so a piece of the last locked word can land after the edge).
+        var own: [Segment] = [], mine = p.ctx == 0
+        for t in tokens {
+            if t.text.hasPrefix(" ") { mine = t.start >= c - 0.08 }
+            if mine { own.append((max(0, t.start - c), max(0, t.end - c), t.text)) }
+        }
         if p.final { return own.isEmpty ? [] : [Emit(start: p.start, final: true, segments: own)] }
         guard p.gen == gen, active, p.start == start else { return [] }  // the window was finished since: its final pass has the text
         let len = Double(p.audio.count - p.ctx) / Double(rate)
@@ -1000,6 +1006,7 @@ struct ClockMap {
         guard anchors.last != nil else { anchors.append((sample, ms)); return false }
         let off = ms - self.ms(sample)
         guard abs(off) > tolerance else { return false }
+        while let last = anchors.last, last.sample >= sample { anchors.removeLast() }  // kept in sample order
         anchors.append((sample, ms))
         return off > 0
     }
@@ -1051,6 +1058,7 @@ struct Tape {
     }
 
     var floats: [Float] { pcm.map { Float($0) / 32767 } }
+    func floats(_ r: Range<Int>) -> [Float] { pcm[r].map { Float($0) / 32767 } }
 }
 
 /// Whether a piece of the microphone is the speakers' sound coming back: it follows the system audio closely at some delay. `ref` is the
@@ -1075,13 +1083,31 @@ func echoLike(_ mic: [Float], _ ref: [Float], maxLag: Int, step: Int = 32) -> Bo
 
 // MARK: the second pass after a call: the whole recording again, with full context and better speaker labels
 
-/// Lines from one pass over a whole recording of one speaker (kept in memory while it recorded), on the wall clock.
-func tapeLines(_ tokens: [Segment], src: String, part: Int, clock: ClockMap) -> [Line] {
+/// Lines from a pass over part of a tape (from tape sample `from`), on the wall clock.
+func tapeLines(_ tokens: [Segment], src: String, part: Int, clock: ClockMap, from: Int = 0) -> [Line] {
     sentences(tokens).compactMap { s in
         guard junk.firstMatch(in: s.text, range: NSRange(location: 0, length: (s.text as NSString).length)) == nil else { return nil }
-        let t = Int(clock.ms(Int(s.start * clock.rate)))
+        let t = Int(clock.ms(from + Int(s.start * clock.rate)))
         return Line(t: t, src: src, text: s.text, part: part, final: true, w: t)
     }
+}
+
+/// How the pass after a call goes through a tape: its stretches of speech, neighbours (less than `gap` ms apart) together up to `most`
+/// samples, so each pass has context and one speaker's turn, and a language change at a turn does not bleed into the next. A stretch
+/// longer than that is a pass of its own (the model cuts it at pauses).
+func tapeGroups(_ tape: Tape, most: Int = 16000 * 14, gap: Double = 3000) -> [Range<Int>] {
+    let a = tape.clock.anchors
+    var out: [Range<Int>] = []
+    for (i, s) in a.enumerated() {
+        let end = i + 1 < a.count ? a[i + 1].sample : tape.pcm.count
+        guard end > s.sample else { continue }
+        if let last = out.last, end - last.lowerBound <= most, s.ms - tape.clock.ms(last.upperBound - 1) <= gap {
+            out[out.count - 1] = last.lowerBound..<end
+        } else {
+            out.append(s.sample..<end)
+        }
+    }
+    return out
 }
 
 /// Which live voice each voice of the second pass is: the one most of its live lines had. Live lines the call window named count too

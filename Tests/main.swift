@@ -258,14 +258,29 @@ for round in 0..<40 {
     func take(_ e: [Emit]) {
         for x in e where shown[x.start]?.final != true { shown[x.start] = (x.final, x.segments.map(\.text).joined()) }
     }
+    // Like Parakeet: words in pieces ("▁w" "ord"), punctuation its own token, and times that move by up to 80 ms from pass to pass.
     func hear(_ p: Pass) -> [Segment] {
         let from = p.start - p.ctx, to = from + p.audio.count
         assert(p.audio.count <= 240_000)
-        return said.filter { $0.start >= from && $0.end <= to }.map { (Double($0.start - from) / 16000, Double($0.end - from) / 16000, $0.text) }
+        var out: [Segment] = []
+        for w in said where w.start >= from && w.end <= to {
+            let a = Double(w.start - from) / 16000, b = Double(w.end - from) / 16000, j = Double(rand(17) - 8) / 100
+            var text = String(w.text.dropFirst()), punct = ""
+            if text.hasSuffix(".") { text.removeLast(); punct = "." }
+            let half = text.index(text.startIndex, offsetBy: text.count / 2)
+            let mid = (a + b) / 2
+            out.append((a + j, mid + j, " " + text[..<half]))
+            out.append((mid + j, b + j, String(text[half...])))
+            if !punct.isEmpty { out.append((b + j, b + j, punct)) }
+        }
+        return out
     }
     let delay = rand(3)
     for c in stride(from: 0, to: Int((t + 3) * 16000), by: 4096) {
         let talking = said.contains { $0.start < c + 4096 && $0.end > c }
+        // the stream may stop for a moment between words (screen capture while nothing plays, the mic muted): the window ends early
+        let silentAround = !said.contains { $0.start < c + 4096 * 2 && $0.end > c - 4096 }
+        if silentAround && rand(6) == 0 { waiting.append(win.flush()) }
         waiting.append(win.push([Float](repeating: 0, count: 4096), speech: talking))
         while waiting.count > delay { for p in waiting.removeFirst() { take(win.done(p, hear(p))) } }
     }
@@ -281,6 +296,8 @@ clock.mark(sample: 0, ms: 1000)
 assert(!clock.mark(sample: 16000, ms: 2100) && clock.ms(16000) == 2000 && clock.mark(sample: 32000, ms: 5000) && clock.ms(32000 + 8000) == 5500 && clock.ms(8000) == 1500)
 
 assert(clock.sample(5500) == 40000 && clock.sample(1500) == 8000)
+var back = ClockMap(); back.mark(sample: 0, ms: 0); back.mark(sample: 16000, ms: 500); back.mark(sample: 8000, ms: 9000)
+assert(back.anchors.map(\.sample) == [0, 8000] && back.ms(16000) == 9500)  // anchors stay in sample order
 // the tape keeps speech with a little around it, timed on the wall clock across the quiet it leaves out
 var tapeRec = Tape()
 for k in 0..<20 { tapeRec.add([Float](repeating: k < 3 || (k > 8 && k < 11) ? 0.5 : 0, count: 4096), ms: Double(k) * 256, speech: k < 3 || (k > 8 && k < 11)) }
@@ -306,6 +323,11 @@ assert(callAppName(bundle: "us.zoom.xos", path: "/Applications/zoom.us.app/Conte
 var tape = ClockMap(); tape.mark(sample: 0, ms: 10_000); tape.mark(sample: 16000 * 5, ms: 60_000)
 let polished = tapeLines([(0.5, 1, " Hello"), (1, 1.5, " there."), (6, 7, " After"), (7, 7.5, " the"), (7.5, 8, " gap.")], src: "sys", part: 2, clock: tape)
 assert(polished.map(\.t) == [10_500, 61_000] && polished.map(\.text) == ["Hello there.", "After the gap."] && polished.allSatisfy { $0.part == 2 && $0.final })
+assert(tapeLines([(0.5, 1, " Later.")], src: "sys", part: 2, clock: tape, from: 16000 * 5).map(\.t) == [60_500])
+// stretches of speech close together go through the second pass together, up to 14 s; far apart or too long, alone
+var groups = Tape()
+for (k, ms) in [0.0, 256, 512, 3000, 3256, 20000, 20256].enumerated() { _ = k; groups.add([Float](repeating: 0.2, count: 4096), ms: ms, speech: true) }
+assert(tapeGroups(groups).count == 2 && tapeGroups(groups, gap: 1000).count == 3 && tapeGroups(groups, most: 4096 * 2).count == 3, "\(tapeGroups(groups))")
 func spoke(_ t: Int, _ spk: String) -> Line { var l = line(t, "sys", "Something said here."); l.spk = spk; return l }
 let liveVoices = [spoke(1000, "2-1"), spoke(3000, "2-1"), spoke(5000, "@Oleg"), spoke(21000, "2-2"), spoke(23000, "2-2"), spoke(40000, "2-3")]
 assert(carryVoices(live: liveVoices, turns: [Turn(start: 0, end: 10000, spk: "a"), Turn(start: 20000, end: 30000, spk: "b"), Turn(start: 39000, end: 41000, spk: "c")]) == ["a": "2-1", "b": "2-2"])
