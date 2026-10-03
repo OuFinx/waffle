@@ -21,13 +21,8 @@ enum Store {
 
     static func dir(_ id: String) -> URL { meetingsDir.appendingPathComponent(id) }
 
-    // MARK: the speech model: inside the app if build.sh put it there, else downloaded by the first-run setup into <data>/models
-
-    static let speechModelURL = URL(string: "https://huggingface.co/ggml-org/parakeet-GGUF/resolve/main/ggml-parakeet-tdt-0.6b-v3-q8_0.bin")!
-    static var speechModelFile: URL { dataDir.appendingPathComponent("models").appendingPathComponent(speechModelURL.lastPathComponent) }
-    static var speechModel: String? {
-        Bundle.main.path(forResource: "ggml-parakeet-tdt-0.6b-v3-q8_0", ofType: "bin") ?? (fm.fileExists(atPath: speechModelFile.path) ? speechModelFile.path : nil)
-    }
+    /// Where versions before 0.4 kept their speech model (whisper.cpp's): removed once the new models are there.
+    static var oldModels: URL { dataDir.appendingPathComponent("models") }
 
     /// Newest first.
     static func ids() -> [String] {
@@ -70,6 +65,24 @@ enum Store {
         text(dir(id).appendingPathComponent("transcript.jsonl")).split(separator: "\n").compactMap { try? JSONDecoder().decode(Line.self, from: Data($0.utf8)) }
     }
     static func saveLines(_ id: String, _ lines: [Line]) {
+        writer.sync { soon = nil; writeLines(id, lines) }  // after any write still queued, so the file ends up with these
+    }
+
+    /// Save while recording, off the main queue: the transcript changes several times a second, and a long one is a big file. Saves
+    /// coming faster than they are written count once (the newest).
+    static func saveLinesSoon(_ id: String, _ lines: [Line]) {
+        writer.async {
+            let first = soon == nil
+            soon = (id, lines)
+            guard first else { return }
+            writer.asyncAfter(deadline: .now() + 1) { if let x = soon { soon = nil; writeLines(x.0, x.1) } }
+        }
+    }
+
+    private static let writer = DispatchQueue(label: "transcript writer", qos: .utility)
+    nonisolated(unsafe) private static var soon: (String, [Line])?  // on the writer queue only
+
+    private static func writeLines(_ id: String, _ lines: [Line]) {
         let enc = JSONEncoder()
         enc.outputFormatting = .withoutEscapingSlashes
         write(lines.compactMap { try? String(decoding: enc.encode($0), as: UTF8.self) }.map { $0 + "\n" }.joined(), dir(id).appendingPathComponent("transcript.jsonl"))
@@ -207,7 +220,9 @@ enum Store {
     /// Notes, the people seen in the call window and the transcript of a meeting, as Claude gets them.
     static func context(_ id: String, lines: [Line], names: [String: String]? = nil, people: [String]? = nil) -> String {
         let notes = self.notes(id), people = Set(self.people(id)).union(people ?? []).sorted()
+        let event = meta(id)["calendar"] as? [String: Any], invited = event?["invited"] as? [String] ?? [], title = event?["title"] as? String ?? ""
         return "# My notes\n\(notes.isEmpty ? "(empty)" : notes)\n\n"
+            + (event == nil ? "" : "# Calendar event\nTitle: \(title)\nInvited: \(invited.isEmpty ? "(nobody listed)" : invited.joined(separator: ", "))\n\n")
             + (people.isEmpty ? "" : "# People seen in the call window\n\(people.joined(separator: ", "))\n\n")
             + "# Transcript\n\(lines.isEmpty ? "(empty)" : transcriptText(lines, names: names ?? speakers(id)))"
     }

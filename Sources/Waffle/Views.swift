@@ -1443,7 +1443,11 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            TranscriptSettings()
+
             ScreenNamesSettings()
+
+            AgendaSettings()
 
             TemplatesSettings()
 
@@ -1456,6 +1460,35 @@ struct SettingsView: View {
         .scrollContentBackground(.hidden)
         .navigationTitle("Settings")
         .onChange(of: appearance) { applyAppearance() }
+    }
+}
+
+/// Settings: the pass after the call, Zoom's mute, and whether Waffle may hear the system audio.
+struct TranscriptSettings: View {
+    @State var polish = Model.polishEnabled
+    @State var followMute = Model.followCallMute
+    @State var audio = SystemAudioPermission.status
+
+    var body: some View {
+        Section {
+            Toggle("Make the transcript better after the call", isOn: $polish).onChange(of: polish) { Model.polishEnabled = polish }
+            Toggle("Skip what I say while muted in Zoom", isOn: $followMute).onChange(of: followMute) { Model.followCallMute = followMute }
+            HStack {
+                Text("System audio")
+                Spacer()
+                switch audio {
+                case .allowed: Label("Allowed", systemImage: "checkmark.circle.fill").symbolRenderingMode(.multicolor)
+                case .denied: Button("Open System Settings") { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")!) }
+                case .unknown: Button("Allow...") { SystemAudioPermission.request { _ in audio = SystemAudioPermission.status } }
+                }
+            }
+            .task { while !Task.isCancelled { audio = SystemAudioPermission.status; try? await Task.sleep(for: .seconds(2)) } }
+        } header: {
+            Text("Transcript")
+        } footer: {
+            Text("After the call, Waffle recognises the whole recording once more with full context and tells the voices apart again (no limit on how many), then writes the notes; it takes about a minute for an hour. The speech for it stays in memory only and is gone after. Muted in Zoom: what you say is not for the call, so it stays out of the notes (needs Accessibility, see Speaker names).")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
 

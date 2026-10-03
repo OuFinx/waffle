@@ -18,7 +18,5 @@ jobs:
           xcodebuild -version
       - name: Self-check
         run: ./build.sh test
-      - name: Speech library
-        run: brew install whisper-cpp
       - name: Build
         run: swift build -c release --product Waffle

@@ -64,8 +64,9 @@ typealias Segment = (start: Double, end: Double, text: String)
 
 
 private func regex(_ p: String, _ o: NSRegularExpression.Options = []) -> NSRegularExpression { try! NSRegularExpression(pattern: p, options: o) }
-private let junk = regex(#"субтитр|dimatorzok|amara\.org|продолжение следует|дякую за перегляд|thanks for watching|^\W*(\[.*\]|\(.*\)|thank you\.?)\W*$|^\W+$"#, .caseInsensitive)
-private let sentence = regex(#"\S.*?(?:[.!?…](?=\s|$)|$)"#, .dotMatchesLineSeparators)
+// Lines that are only a sound mark ("[music]", "(laughs)") or punctuation. Parakeet does not make up the subtitle credits Whisper did
+// ("thanks for watching"), so real speech like "Thank you." stays.
+private let junk = regex(#"^\W*(\[[^\]]*\]|\([^)]*\))\W*$|^\W+$"#, .caseInsensitive)
 private let wordRe = regex(#"\w+"#)
 
 private func all(_ re: NSRegularExpression, _ s: String) -> [NSTextCheckingResult] { re.matches(in: s, range: NSRange(location: 0, length: (s as NSString).length)) }
@@ -81,13 +82,46 @@ func splitSentences(_ segments: [Segment]) -> [(Int, String)] {
     }
     guard let last = spans.last else { return [] }
     let ns = text as NSString
-    return all(sentence, text).compactMap { m in
-        let piece = ns.substring(with: m.range).split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        let at = m.range.location
+    return sentenceRanges(text).compactMap { r in
+        let raw = ns.substring(with: r)
+        let piece = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let at = r.location + ((raw as NSString).length - (raw.drop { $0.isWhitespace } as Substring).utf16.count)
         let sp = spans.first { $0.a <= at && at < $0.b } ?? last
         let off = Int((sp.start + (sp.end - sp.start) * Double(at - sp.a) / Double(max(sp.b - sp.a, 1))) * 1000)
         return piece.isEmpty || junk.firstMatch(in: piece, range: NSRange(location: 0, length: (piece as NSString).length)) != nil ? nil : (off, piece)
     }
+}
+
+/// Words that end with a dot inside a sentence ("Mr. Smith", "at 3 p.m. tomorrow", "і т.д."), lowercased, without the last dot.
+private let abbreviations: Set<String> = ["mr", "mrs", "ms", "dr", "prof", "st", "vs", "e.g", "i.e", "a.m", "p.m", "jr", "sr", "inc", "ltd", "approx",
+                                          "т.д", "т.п", "т.ч", "напр", "див", "ім", "вул", "проф", "т.е", "т.к", "см"]
+
+/// The text ends a sentence: ".!?…" (and the Greek question mark ";" in Greek text), not after an abbreviation or an initial ("J.").
+func endsSentence(_ text: String) -> Bool {
+    let t = text.trimmingCharacters(in: .whitespaces)
+    guard let c = t.last else { return false }
+    if c == ";" { return t.unicodeScalars.contains { (0x370...0x3FF).contains($0.value) } }
+    guard ".!?…".contains(c) else { return false }
+    guard c == ".", let word = t.split(whereSeparator: \.isWhitespace).last.map({ String($0.dropLast()) }) else { return true }
+    if abbreviations.contains(word.lowercased()) { return false }
+    return !(word.count == 1 && word.first!.isUppercase)
+}
+
+/// The sentences of a text as UTF-16 ranges: each ends where endsSentence says, before a space or the end.
+func sentenceRanges(_ text: String) -> [NSRange] {
+    let ns = text as NSString, n = ns.length
+    var out: [NSRange] = [], from = 0, i = 0
+    func space(_ c: unichar) -> Bool { c == 32 || c == 9 || c == 10 || c == 13 || c == 0xA0 }
+    while i < n {
+        let c = ns.character(at: i)
+        if (c == 46 || c == 33 || c == 63 || c == 0x2026 || c == 59), i + 1 == n || space(ns.character(at: i + 1)),
+           endsSentence(ns.substring(with: NSRange(location: from, length: i + 1 - from))) {
+            out.append(NSRange(location: from, length: i + 1 - from)); from = i + 1
+        }
+        i += 1
+    }
+    if from < n, !ns.substring(from: from).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append(NSRange(location: from, length: n - from)) }
+    return out.filter { !ns.substring(with: $0).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 }
 
 func words(_ t: String) -> [String] {
@@ -95,14 +129,36 @@ func words(_ t: String) -> [String] {
     return all(wordRe, lower).map { ns.substring(with: $0.range) }
 }
 
-/// On speakers the mic also hears the other side: drop "Me" lines whose words mostly repeat a "Them" line from the same moment.
-func dropEcho(_ lines: [Line], windowMs: Int = 30000) -> [Line] {
-    let them = lines.filter { $0.src == "sys" }.map { ($0.t, Set(words($0.text))) }
+/// How many words of `a` appear in `b` in the same order (longest common subsequence).
+func commonRun(_ a: [String], _ b: [String]) -> Int {
+    guard !a.isEmpty, !b.isEmpty else { return 0 }
+    var prev = [Int](repeating: 0, count: b.count + 1)
+    for x in a {
+        var cur = [Int](repeating: 0, count: b.count + 1)
+        for (j, y) in b.enumerated() { cur[j + 1] = x == y ? prev[j] + 1 : max(prev[j + 1], cur[j]) }
+        prev = cur
+    }
+    return prev[b.count]
+}
+
+/// A "Me" line that is the speakers' sound coming back into the mic: it starts while the same words of that "Them" line were said (from a
+/// second before the line to a second after the point where the rest of the line is as long as the "Me" line, about 0.4 s a word),
+/// repeating most of it in order. Short lines (1-2 words) count only when they
+/// start with the "Them" line, where echo cancellation lets the first moment through; a short "Yes." or "Okay." a moment later is an answer.
+func isEcho(_ mine: [String], at t: Int, them: [String], at s: Int) -> Bool {
+    guard !mine.isEmpty, !them.isEmpty else { return false }
+    if mine.count <= 2 { return abs(t - s) <= 600 && commonRun(mine, them) == mine.count }
+    guard t >= s - 1000, t <= s + max(0, them.count - mine.count) * 400 + 1000 else { return false }
+    return Double(commonRun(mine, them)) >= 0.7 * Double(mine.count)
+}
+
+/// On speakers the mic also hears the other side: drop "Me" lines that are an echo of a "Them" line (see isEcho).
+func dropEcho(_ lines: [Line]) -> [Line] {
+    let them = lines.filter { $0.src == "sys" }.map { ($0.t, words($0.text)) }
     return lines.filter { l in
         guard l.src == "mic" else { return true }
         let mine = words(l.text)
-        guard !mine.isEmpty else { return true }
-        return !them.contains { abs($0.0 - l.t) < windowMs && Double(mine.filter($0.1.contains).count) / Double(mine.count) >= 0.6 }
+        return !them.contains { isEcho(mine, at: l.t, them: $0.1, at: $0.0) }
     }
 }
 
@@ -110,36 +166,50 @@ func dropEcho(_ lines: [Line], windowMs: Int = 30000) -> [Line] {
 func replaceWindow(_ lines: [Line], src: String, w: Int, part: Int, final: Bool, segments: [Segment], echoMs: Int = 30000) -> [Line] {
     let fresh = splitSentences(segments).map { Line(t: w + $0.0, src: src, text: $0.1, part: part, final: final, w: w) }
     let all = (lines.filter { !($0.w == w && $0.src == src) } + fresh).sorted { $0.t < $1.t }
-    // Every pass so far left the transcript free of echoes, so only lines near the new ones can be echoes now: a "Me" line within
-    // echoMs of a new line, checked against "Them" lines within echoMs of it. The rest of a long meeting is not looked at again.
+    // Every pass so far left the transcript free of echoes, so only lines near the new ones can be echoes now (an echo sits within a
+    // long sentence of its "Them" line). The rest of a long meeting is not looked at again.
     guard let from = fresh.map(\.t).min() else { return all }
     let cut = firstIndex(all.count) { all[$0].t >= from - 2 * echoMs }
-    return Array(all[..<cut]) + dropEcho(Array(all[cut...]), windowMs: echoMs)
+    return Array(all[..<cut]) + dropEcho(Array(all[cut...]))
 }
 
-/// Sentences of one recognition pass over recognizer tokens: text, index after its last token, end time, and when the next token starts.
-func sentences(_ tokens: [Segment]) -> [(text: String, tokenEnd: Int, end: Double, next: Double?)] {
-    var out: [(text: String, tokenEnd: Int, end: Double, next: Double?)] = [], text = ""
+/// One sentence of a recognition pass: its text, the index after its last token, when it starts and ends, and when the next token starts.
+typealias Sentence = (text: String, tokenEnd: Int, start: Double, end: Double, next: Double?)
+
+/// Sentences of one recognition pass over recognizer tokens (see endsSentence).
+func sentences(_ tokens: [Segment]) -> [Sentence] {
+    var out: [Sentence] = [], text = "", start = 0.0
     for (i, t) in tokens.enumerated() {
+        if text.trimmingCharacters(in: .whitespaces).isEmpty { start = t.start }
         text += t.text
         let next = i + 1 < tokens.count ? tokens[i + 1] : nil
-        let closes = t.text.trimmingCharacters(in: .whitespaces).last.map { ".!?…".contains($0) } ?? false
-        if (closes && (next == nil || next!.text.hasPrefix(" "))) || next == nil {
+        if next == nil || (next!.text.hasPrefix(" ") && endsSentence(text)) {
             let s = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            if !s.isEmpty { out.append((s, i + 1, t.end, next?.start)) }
+            if !s.isEmpty { out.append((s, i + 1, start, t.end, next?.start)) }
             text = ""
         }
     }
     return out
 }
 
-/// How many leading sentences of this pass can be locked for good: another sentence already follows each, and each ends at least
-/// `margin` seconds before the audio does. Locked text is never re-transcribed, so a later change of language (or a worse guess on a
-/// longer window) can not rewrite it.
-func lockableSentences(_ now: [(text: String, tokenEnd: Int, end: Double, next: Double?)], audioEnd: Double, margin: Double = 0.8) -> Int {
+/// How many leading sentences of this pass can be locked for good: another sentence already follows each, each ends at least `margin`
+/// seconds before the audio does, and each read the same in the pass before (`previous`), so one unlucky pass can not lock a wrong word.
+/// Locked text is never re-transcribed, so a later change of language (or a worse guess on a longer window) can not rewrite it.
+func lockableSentences(_ now: [Sentence], previous: [String]? = nil, audioEnd: Double, margin: Double = 0.8) -> Int {
     var n = 0
-    while n < now.count - 1, now[n].end <= audioEnd - margin { n += 1 }
+    while n < now.count - 1, now[n].end <= audioEnd - margin, previous.map({ n < $0.count && $0[n] == now[n].text }) ?? true { n += 1 }
     return n
+}
+
+/// Where to cut a window that grew too long without a lockable sentence: before the word (a token starting with a space) after the
+/// widest pause between `from` and `to` seconds. nil when no word starts there.
+func forcedCut(_ tokens: [Segment], from: Double, to: Double) -> Int? {
+    var best: (i: Int, gap: Double)?
+    for i in 1..<max(1, tokens.count) where tokens[i].text.hasPrefix(" ") && tokens[i].start >= from && tokens[i].start <= to {
+        let gap = tokens[i].start - tokens[i - 1].end
+        if best == nil || gap > best!.gap { best = (i, gap) }
+    }
+    return best?.i
 }
 
 /// Claude's reply -> (title, folders, speaker names, notes). The first lines may be "TITLE: ...", "FOLDERS: a, b" and
@@ -280,6 +350,7 @@ You turn a meeting transcript and the user's own rough notes into meeting notes.
 Speaker "Me" is the user (their microphone). Every other label is someone else on the call: a name, "Speaker 2" (a voice told apart by sound, name unknown), or "Them" (everyone else together).
 A label that first shows up partway through is a new voice joining the conversation. Lines labelled "Them" can be several people: tell them apart by what they say and by turn-taking (a question and its answer, a greeting, someone addressed by name), and credit a point to a person only when that is clear.
 If the input lists the people seen in the call window (the names Zoom or Teams showed), they are most likely the people in the call (the list can hold a stray non-name): spell their names as listed, and use them to tell who a voice is when the conversation supports it.
+If the input has the calendar event, its title is what the meeting was planned as and its invited people are likely in the call (not all of them may have joined); spell their names as listed.
 The transcript is machine-made: fix obvious recognition errors from context, never invent facts.
 The meeting may be in any language, or several. Always write the notes in English; keep names, product names and ticket numbers as spoken.
 The user's notes show what they care about: make sure those topics are covered and expanded with details from the transcript.
@@ -473,7 +544,7 @@ let builtinTemplates: [Template] = [
 
 let askPrompt = """
 You help the user during or after a meeting. You get the transcript and the user's notes, then a question.
-Speaker "Me" is the user; every other label (a name, "Speaker 2", "Them") is someone else on the call; "Them" can be several people. If the input lists the people seen in the call window, they are most likely the people in the call. The transcript is machine-made and may have recognition errors.
+Speaker "Me" is the user; every other label (a name, "Speaker 2", "Them") is someone else on the call; "Them" can be several people. If the input lists the people seen in the call window or invited in the calendar, they are most likely the people in the call. The transcript is machine-made and may have recognition errors.
 Answer briefly and only from the transcript; say so if it is not there. Reply in the language of the question.
 """
 
@@ -500,6 +571,16 @@ private let appWords: Set<String> = [
 /// A name as the call app shows it, without what the app adds: "Oleg Petrenko (Host)", "Oleg Petrenko, muted" -> "Oleg Petrenko".
 /// nil when it does not look like a person's name: `minWords` to 4 words, each starting with a capital letter, letters only.
 func personName(_ raw: String, minWords: Int = 2) -> String? {
+    // "Petrenko, Oleg" (a company directory, Teams): surname first. "Oleg Petrenko, muted" is a name and a state.
+    let halves = raw.components(separatedBy: CharacterSet(charactersIn: "(|[\n\u{2022}")).first?.split(separator: ",", maxSplits: 1).map(String.init) ?? []
+    if halves.count == 2, let last = plainName(halves[0], minWords: 1), let first = plainName(halves[1], minWords: 1),
+       last.split(separator: " ").count == 1, first.split(separator: " ").count <= 2 {
+        return plainName(first + " " + last, minWords: minWords)
+    }
+    return plainName(raw, minWords: minWords)
+}
+
+private func plainName(_ raw: String, minWords: Int) -> String? {
     let cut = raw.components(separatedBy: CharacterSet(charactersIn: ",(|[\n\u{2022}")).first ?? raw
     let words = cut.split(whereSeparator: \.isWhitespace).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".:;!?\"")) }.filter { !$0.isEmpty }
     guard (minWords...4).contains(words.count), words.joined().count <= 40 else { return nil }
@@ -510,6 +591,18 @@ func personName(_ raw: String, minWords: Int = 2) -> String? {
 }
 
 private let talkingFirst = regex(#"^\s*(?:talking|speaking|говорить|говорит|розмовляє)\s*:\s*(.+)$"#, .caseInsensitive)
+private let notTalking = regex(#"\b(?:not|не)\s+(?:speaking|talking|говорить|говорит|розмовляє)"#, .caseInsensitive)
+private let selfMark = regex(#"^(.+?)\s*\((?:[^)]*,\s*)?(?:me|you|я|вы|ви)\)"#, .caseInsensitive)
+
+/// The user's own name as the call window marks it: "Oleg Petrenko (Host, me)" (Zoom), "Oleg Petrenko (You)" (Teams), "(Я)".
+func selfName(_ texts: [String]) -> String? {
+    for t in texts where t.count <= 120 {
+        let ns = t as NSString
+        if let m = selfMark.firstMatch(in: t, range: NSRange(location: 0, length: ns.length)), let n = personName(ns.substring(with: m.range(at: 1)), minWords: 1) { return n }
+    }
+    return nil
+}
+
 private let talkingAfter = regex(#"^(.+?)(?:\s+is|\s*,|\s*\(|\s+-)?\s*(?:is\s+)?\b(?:speaking|talking|говорить|говорит|розмовляє)\b"#, .caseInsensitive)
 
 /// Who the call window says is talking, from its labels or text: "Talking: Oleg Petrenko" (Zoom), "Oleg Petrenko is speaking",
@@ -518,7 +611,7 @@ func speakingNames(_ texts: [String]) -> [String] {
     var out: [String] = []
     for t in texts {
         let ns = t as NSString, r = NSRange(location: 0, length: ns.length)
-        guard t.count <= 120, t.range(of: "not speaking", options: .caseInsensitive) == nil,
+        guard t.count <= 120, notTalking.firstMatch(in: t, range: r) == nil,
               let m = talkingFirst.firstMatch(in: t, range: r) ?? talkingAfter.firstMatch(in: t, range: r),
               let name = personName(ns.substring(with: m.range(at: 1)), minWords: 1), !out.contains(name) else { continue }
         out.append(name)
@@ -553,8 +646,15 @@ func screenSpeakers(_ turns: [Turn], _ talking: [(t: Int, name: String)]) -> [St
         let total = v.values.reduce(0, +)
         if let top = v.max(by: { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) }), top.value >= 3, top.value * 3 >= total * 2 { out[spk] = top.key }
     }
-    let taken = Dictionary(grouping: out.values) { $0 }
-    return out.filter { taken[$0.value]?.count == 1 }
+    // A name two voices would get goes to both when they never talk at the same time (one person the diarizer split in two), else to neither.
+    let byName = Dictionary(grouping: out.keys) { out[$0]! }
+    func overlap(_ a: String, _ b: String) -> Bool {
+        turns.contains { x in x.spk == a && turns.contains { y in y.spk == b && max(x.start, y.start) < min(x.end, y.end) } }
+    }
+    return out.filter { spk, name in
+        let all = byName[name] ?? []
+        return all.count == 1 || !all.contains { $0 != spk && overlap($0, spk) }
+    }
 }
 
 /// "Them" lines that no diarized voice covers get the person the call window showed as the only one talking around then (from 1 s
@@ -575,7 +675,8 @@ func labelFromScreen(_ lines: [Line], _ talking: [(t: Int, name: String)]) -> [L
 /// no other voice has that name. A name never moves to another voice or goes away as more looks come in.
 func settleNames(_ settled: [String: String], _ fresh: [String: String]) -> [String: String] {
     var out = settled
-    for (spk, name) in fresh.sorted(by: { $0.key < $1.key }) where out[spk] == nil && !out.values.contains(name) { out[spk] = name }
+    let shared = Set(Dictionary(grouping: fresh.values) { $0 }.filter { $0.value.count > 1 }.keys)  // one person split in two voices
+    for (spk, name) in fresh.sorted(by: { $0.key < $1.key }) where out[spk] == nil && (!out.values.contains(name) || shared.contains(name)) { out[spk] = name }
     return out
 }
 
@@ -772,3 +873,283 @@ each with a heading "## <title> (<date>) [id: <id>]", then a question.
 Answer briefly from these meetings only; say so if the answer is not there. When you use a meeting, cite it as a Markdown link [<title>, <date>](/m/<id>).
 Reply in the language of the question. Use 24-hour time.
 """
+
+// MARK: live recognition windows (Recorder runs one per speaker)
+
+/// One recognition pass a Windower asks for: the window's audio with up to `ctx` samples of what came before it (context the recognizer
+/// hears but whose words are not this window's), and the window's start, in samples of this speaker's stream.
+struct Pass { let gen: Int; let audio: [Float]; let ctx: Int; let start: Int; let final: Bool }
+
+/// Text for a window: the window's start in samples, final or not, and its words timed from the window start.
+struct Emit { let start: Int; let final: Bool; let segments: [Segment] }
+
+/// The live transcript of one speaker as windows of audio that are re-recognized as they grow, so words show up fast and get better
+/// with context (Parakeet: about half the words right on 2 s pieces, 95% on 15 s). Speech decides where windows start and end (from voice
+/// activity detection, 256 ms at a time). Finished sentences are locked once two passes agree and are cut off the window, with the last
+/// 2 s kept as context, so text on screen is never rewritten later and the next words are still heard in context. A window ends at a
+/// pause; one that would outgrow what the model hears at once (15 s) is cut at a sentence end, else at the widest pause between words.
+/// Pure logic: the Recorder feeds audio and runs the passes, Tests/main.swift checks it with a made-up recognizer.
+final class Windower {
+    let rate = 16000
+    var ctxMax = 16000 * 2           // context kept before a window
+    var preroll = 16000              // audio before the first speech that belongs to the window (voice detection notices a word late)
+    var hard = 240_000               // the most audio the model hears at once (15 s): a pass never gets more, context goes first
+    var limit = 240_000 - 4096 * 3   // a window this long (with its context) gets cut
+    var updateMin = 16000            // a pass once this much new audio came in...
+    var updateMax = 16000 * 5 / 2    // ...at a pause, or at the latest after this much
+    var pauseUpdate = 4096           // a pause long enough for a pass
+    var pauseFinal = 16000 * 4 / 5   // a pause that ends a window of minFinal or more
+    var minFinal = 16000 * 3
+    var pauseEnd = 16000 * 2         // a pause that ends any window
+
+    private(set) var buf: [Float] = []  // context + window
+    private(set) var ctx = 0, start = 0, active = false
+    private var clock = 0, quiet = 0, since = 0, gen = 0, inFlight = false
+    private var previous: [String]?  // the sentences of the last pass over this window, to lock only what two passes agree on
+
+    /// Audio of this speaker, in order; `speech` is whether it holds speech. Returns the passes to run, in order.
+    func push(_ chunk: [Float], speech: Bool) -> [Pass] {
+        clock += chunk.count
+        buf += chunk
+        guard active else {
+            if buf.count > ctxMax + preroll { buf.removeFirst(buf.count - ctxMax - preroll) }
+            guard speech else { return [] }
+            active = true
+            let lead = min(buf.count, preroll + chunk.count)
+            ctx = buf.count - lead; start = clock - lead
+            quiet = 0; since = lead; previous = nil
+            return []
+        }
+        since += chunk.count
+        quiet = speech ? 0 : quiet + chunk.count
+        if quiet >= pauseEnd || (quiet >= pauseFinal && buf.count - ctx >= minFinal) || buf.count >= limit + 16000 * 2 { return [finish()] }
+        if !inFlight, buf.count >= limit || (since >= updateMin && (quiet >= pauseUpdate || since >= updateMax)) {
+            since = 0; inFlight = true
+            return [pass(final: false)]
+        }
+        return []
+    }
+
+    /// The window as it is, as a final pass (the speaker stopped, the stream had a gap, or the recording ends). Nothing when idle.
+    func flush() -> [Pass] { active ? [finish()] : [] }
+
+    /// The window and as much of its context as fits in what the model hears at once.
+    private func pass(final: Bool) -> Pass {
+        let drop = min(ctx, max(0, buf.count - hard))
+        return Pass(gen: gen, audio: Array(buf[drop...]), ctx: ctx - drop, start: start, final: final)
+    }
+
+    private func finish() -> Pass {
+        let p = pass(final: true)
+        gen += 1; active = false; inFlight = false; previous = nil
+        buf = Array(buf.suffix(ctxMax))
+        return p
+    }
+
+    /// A pass came back with tokens timed from the start of its audio (nil: it failed). Returns the text to show, in order.
+    func done(_ p: Pass, _ tokens: [Segment]?) -> [Emit] {
+        if !p.final && p.gen == gen { inFlight = false }
+        guard let tokens else { return [] }
+        let c = Double(p.ctx) / Double(rate)
+        // The context's words belong to the window before; a word straddling the edge stays with the one it starts in.
+        let own: [Segment] = tokens.filter { $0.start >= c - 0.08 }.map { (max(0, $0.start - c), max(0, $0.end - c), $0.text) }
+        if p.final { return own.isEmpty ? [] : [Emit(start: p.start, final: true, segments: own)] }
+        guard p.gen == gen, active, p.start == start else { return [] }  // the window was finished since: its final pass has the text
+        let len = Double(p.audio.count - p.ctx) / Double(rate)
+        let now = sentences(own)
+        var n = lockableSentences(now, previous: previous, audioEnd: len)
+        var cut: (tokens: Int, at: Double)?
+        if n > 0 {
+            cut = (now[n - 1].tokenEnd, cutTime(now[n - 1]))
+        } else if buf.count >= limit {  // too long: lock what there is, agreed or not
+            if now.count > 1 {
+                n = now.count - 1; cut = (now[n - 1].tokenEnd, cutTime(now[n - 1]))
+            } else if let i = forcedCut(own, from: max(0, len - 8), to: len - 1) {
+                cut = (i, (own[i - 1].end + own[i].start) / 2)
+            } else {
+                cut = (own.count, len)
+            }
+        }
+        guard let (k, at) = cut else {
+            previous = now.map(\.text)
+            return [Emit(start: p.start, final: false, segments: own)]
+        }
+        let samples = min(Int(at * Double(rate)), buf.count - ctx)
+        let shift = Double(samples) / Double(rate)
+        start += samples
+        let keep = min(ctxMax, ctx + samples)
+        buf.removeFirst(ctx + samples - keep); ctx = keep
+        previous = n > 0 ? now[n...].map(\.text) : nil
+        let rest: [Segment] = own[k...].map { (max(0, $0.start - shift), max(0, $0.end - shift), $0.text) }
+        return [Emit(start: p.start, final: true, segments: Array(own[..<k])), Emit(start: start, final: false, segments: rest)]
+    }
+
+    /// Just after a sentence's last word, before the next word starts.
+    private func cutTime(_ s: Sentence) -> Double { s.next.map { min(s.end + 0.15, (s.end + $0) / 2) } ?? s.end + 0.15 }
+}
+
+/// Wall time of the samples of one audio stream: anchors where the stream started or jumped (a gap while nothing played, a clock that
+/// drifted), samples counted from the last one before. Timing comes from the audio's own timestamps, not from when buffers arrive.
+struct ClockMap {
+    var rate = 16000.0
+    private(set) var anchors: [(sample: Int, ms: Double)] = []
+
+    /// Samples from `sample` on started at wall time `ms`. Adds an anchor only when that is more than `tolerance` ms off the time the
+    /// last anchor gives; true when the stream jumped ahead (a gap).
+    @discardableResult mutating func mark(sample: Int, ms: Double, tolerance: Double = 300) -> Bool {
+        guard anchors.last != nil else { anchors.append((sample, ms)); return false }
+        let off = ms - self.ms(sample)
+        guard abs(off) > tolerance else { return false }
+        anchors.append((sample, ms))
+        return off > 0
+    }
+
+    /// Wall time (epoch ms) of a sample.
+    func ms(_ sample: Int) -> Double {
+        guard !anchors.isEmpty else { return 0 }
+        let i = max(0, firstIndex(anchors.count) { anchors[$0].sample > sample } - 1)
+        return anchors[i].ms + Double(sample - anchors[i].sample) * 1000 / rate
+    }
+
+    /// The sample at a wall time, from the last anchor at or before it.
+    func sample(_ ms: Double) -> Int {
+        guard !anchors.isEmpty else { return 0 }
+        let i = max(0, (anchors.lastIndex { $0.ms <= ms } ?? 0))
+        return anchors[i].sample + Int((ms - anchors[i].ms) * rate / 1000)
+    }
+}
+
+/// The speech of one speaker kept for the pass after the call, in memory only: 16-bit, only the stretches around speech (from 256 ms
+/// before to a second after), each with its wall time. Stops taking more at `cap` samples (2 hours) and says so.
+struct Tape {
+    var cap = 16000 * 3600 * 2
+    private(set) var pcm: [Int16] = []
+    private(set) var clock = ClockMap()
+    private(set) var full = false
+    private var held: (x: [Float], ms: Double)?  // the last quiet chunk, the onset of what may come
+    private var after = 0  // quiet chunks still kept after speech
+
+    var seconds: Double { Double(pcm.count) / 16000 }
+
+    /// The next chunk of this speaker's stream (`ms`: its wall time), and whether it holds speech.
+    mutating func add(_ x: [Float], ms: Double, speech: Bool) {
+        if speech {
+            if let h = held { append(h.x, h.ms) }
+            held = nil; after = 4
+            append(x, ms)
+        } else if after > 0 {
+            after -= 1; append(x, ms)
+        } else {
+            held = (x, ms)
+        }
+    }
+
+    private mutating func append(_ x: [Float], _ ms: Double) {
+        guard pcm.count + x.count <= cap else { full = true; return }
+        clock.mark(sample: pcm.count, ms: ms, tolerance: 20)
+        pcm += x.map { Int16(max(-1, min(1, $0)) * 32767) }
+    }
+
+    var floats: [Float] { pcm.map { Float($0) / 32767 } }
+}
+
+/// Whether a piece of the microphone is the speakers' sound coming back: it follows the system audio closely at some delay. `ref` is the
+/// system audio from `maxLag` samples before the mic piece to its end; checked at half the rate, every `step` samples of delay.
+func echoLike(_ mic: [Float], _ ref: [Float], maxLag: Int, step: Int = 32) -> Bool {
+    guard mic.count >= 64, ref.count >= mic.count + maxLag else { return false }
+    func energy(_ x: ArraySlice<Float>) -> Float { var e: Float = 0; var i = x.startIndex; while i < x.endIndex { e += x[i] * x[i]; i += 2 }; return e }
+    let n = Float(mic.count / 2)
+    let em = energy(mic[...])
+    guard (em / n).squareRoot() >= 0.0025 else { return false }
+    var best: Float = 0
+    for lag in stride(from: 0, through: maxLag, by: step) {
+        let lo = maxLag - lag, seg = ref[lo..<(lo + mic.count)]
+        let er = energy(seg)
+        guard (er / n).squareRoot() >= 0.01 else { continue }
+        var dot: Float = 0, i = 0
+        while i < mic.count { dot += mic[i] * seg[lo + i]; i += 2 }
+        best = max(best, dot / (em * er).squareRoot())
+    }
+    return best >= 0.75
+}
+
+// MARK: the second pass after a call: the whole recording again, with full context and better speaker labels
+
+/// Lines from one pass over a whole recording of one speaker (kept in memory while it recorded), on the wall clock.
+func tapeLines(_ tokens: [Segment], src: String, part: Int, clock: ClockMap) -> [Line] {
+    sentences(tokens).compactMap { s in
+        guard junk.firstMatch(in: s.text, range: NSRange(location: 0, length: (s.text as NSString).length)) == nil else { return nil }
+        let t = Int(clock.ms(Int(s.start * clock.rate)))
+        return Line(t: t, src: src, text: s.text, part: part, final: true, w: t)
+    }
+}
+
+/// Which live voice each voice of the second pass is: the one most of its live lines had. Live lines the call window named count too
+/// ("@Oleg"). A voice with too few lines, or no clear winner, stays new.
+func carryVoices(live: [Line], turns: [Turn]) -> [String: String] {
+    var votes: [String: [String: Int]] = [:]
+    for l in live where l.src == "sys" {
+        guard let spk = l.spk, let t = turns.first(where: { $0.start <= l.t + 300 && l.t + 300 < $0.end }) else { continue }
+        votes[t.spk, default: [:]][spk, default: 0] += 1
+    }
+    return votes.compactMapValues { v in
+        let total = v.values.reduce(0, +)
+        guard let top = v.max(by: { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) }), top.value >= 2, top.value * 10 >= total * 6 else { return nil }
+        return top.key
+    }
+}
+
+/// The second pass replaces the live transcript of a recording only when it did not lose text: per speaker at least 70% of the live text
+/// (live text of less than 40 characters does not count).
+func polishKeeps(live: [Line], fresh: [Line]) -> Bool {
+    for src in ["mic", "sys"] {
+        let a = live.filter { $0.src == src }.map(\.text.count).reduce(0, +), b = fresh.filter { $0.src == src }.map(\.text.count).reduce(0, +)
+        if a >= 40 && b * 10 < a * 7 { return false }
+    }
+    return true
+}
+
+/// Fresh lines without the ones the user deleted while recording: same speaker, within 2 s, mostly the same words.
+func withoutDeleted(_ fresh: [Line], _ deleted: [Line]) -> [Line] {
+    fresh.filter { f in
+        !deleted.contains { d in
+            let a = words(d.text), b = words(f.text)
+            return d.src == f.src && abs(d.t - f.t) <= 2000 && !a.isEmpty && Double(commonRun(a, b)) >= 0.5 * Double(max(a.count, b.count))
+        }
+    }
+}
+
+/// A call with one other person on the invite and one voice on the other side: that voice is that person.
+func oneOnOne(invited: [String], voices: [String]) -> [String: String] {
+    invited.count == 1 && voices.count == 1 ? [voices[0]: invited[0]] : [:]
+}
+
+// MARK: which app a process holding the microphone is
+
+/// Apps that take the microphone without being a call: dictation, recorders, assistants, Waffle-like tools.
+let notCallApps: Set<String> = [
+    "com.superduper.superwhisper", "com.prakashjoshipax.VoiceInk", "com.electron.wispr-flow", "com.goodsnooze.MacWhisper", "com.kitlangton.Hex",
+    "com.raycast.macos", "com.loom.desktop", "com.obsproject.obs-studio", "com.apple.QuickTimePlayerX", "com.apple.VoiceMemos",
+    "com.openai.chat", "com.anthropic.claudefordesktop", "com.apple.dt.Xcode", "com.getcleanshot.app", "com.getcleanshot.app-setapp",
+    "com.rogueamoeba.audiohijack", "com.descript.beachcube", "com.aqua.voice", "com.willowvoice.app", "com.spokenly.app",
+    "com.screenstudio.app", "io.github.oufinx.waffle",
+]
+
+/// The name to show for a process holding the microphone, or nil when it is not a call: macOS itself and the apps above. FaceTime calls
+/// run in avconferenced and phone calls in callservicesd; Meet or Teams in Safari in WebKit's GPU process; a browser's tab in a helper
+/// app inside the browser (its outermost .app in `path`).
+func callAppName(bundle: String, path: String, name: String?) -> String? {
+    if notCallApps.contains(bundle) || notCallApps.contains(where: { bundle.hasPrefix($0 + ".") }) { return nil }
+    switch bundle {
+    case "com.apple.FaceTime", "com.apple.avconferenced": return "FaceTime"
+    case "com.apple.TelephonyUtilities", "com.apple.telephonyutilities.callservicesd", "com.apple.callservicesd": return "Phone"
+    case "com.apple.WebKit.GPU", "com.apple.WebKit.WebContent": return "Safari"
+    default: break
+    }
+    if bundle.hasPrefix("com.apple.") { return nil }
+    if let r = path.range(of: ".app/") {
+        let app = path[..<r.lowerBound].split(separator: "/").last.map(String.init)
+        if let app, !app.isEmpty { return app }
+    }
+    return name.flatMap { $0.isEmpty ? nil : $0 } ?? (bundle.isEmpty ? nil : bundle)
+}

@@ -41,7 +41,7 @@ struct Page: Equatable { var scope: Scope; var selected: String?; var report: Op
 struct QA: Identifiable, Hashable { let id = UUID(); var q: String; var a: String?; var failed = false }
 
 let silenceEnd: TimeInterval = 180  // no speech for this long ends the meeting
-let micReleaseEnd: TimeInterval = 6  // the call apps released the microphone this long ago
+let micReleaseEnd: TimeInterval = 15  // the call apps released the microphone this long ago (they let go for a moment when switching devices or rooms)
 let resumeWithin: TimeInterval = 3600  // an interrupted meeting can be continued from the call prompt for this long
 
 /// A warning alert with a destructive button and Cancel (Esc). True when the destructive button was clicked.
@@ -110,7 +110,7 @@ final class Model: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
     }
     /// The first-run setup (model download, permissions, AI) is shown over the main window.
-    @Published var showSetup = !UserDefaults.standard.bool(forKey: "setupDone")
+    @Published var showSetup = !UserDefaults.standard.bool(forKey: "setupDone") || !Engine.downloaded  // an update can need new models
     @Published var revision = 0  // bumped when files changed on disk; open views reload
     @Published var toast: String?
     @Published var threads: [String: [QA]] = [:]  // chat per scope: "m:<id>", "f:<folder>", "all"
@@ -131,11 +131,12 @@ final class Model: ObservableObject {
     var lines: [Line] { get { live.lines } set { live.lines = newValue } }
     var hearing: Set<String> { get { live.hearing } set { live.hearing = newValue } }
     /// "Me" is not transcribed while this is on, for meetings where you mostly listen and talk to the room. Off again for each new recording.
-    @Published var micMuted = false {
-        didSet {
-            recorder?.micOn = !micMuted
-            if micMuted { hearing.remove("mic") }
-        }
+    @Published var micMuted = false { didSet { micChanged() } }
+    /// The user is muted in the call app (Zoom): what they say then is not for the call, so it is not transcribed either (Settings).
+    @Published var callMuted = false { didSet { if callMuted != oldValue { micChanged() } } }
+    private func micChanged() {
+        recorder?.micOn = !micMuted && !callMuted
+        if micMuted || callMuted { hearing.remove("mic") }
     }
 
     var busy: Bool { [.recording, .finalizing, .summarizing].contains(status) }
@@ -153,12 +154,18 @@ final class Model: ObservableObject {
     private var settled: [String: String] = [:]  // names the call window gave to voices in this recording; they stay, see settleNames
     private var lastSpeech: Date?, micSeen = false, micEmptySince: Date?
     private var toastTimer: Timer?
+    private var deleted: [Line] = []  // lines the user deleted while this recording ran: the pass after the call leaves them out
+    private var selfName: String?  // the user's own name as the call window shows it
 
     init() {
         try? FileManager.default.createDirectory(at: meetingsDir, withIntermediateDirectories: true)
         Store.migrateLatestReports()
         reload()
         shown = page
+        // Asleep is not silent: do not end the meeting for "long silence" the moment the Mac wakes.
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            if self?.status == .recording { self?.lastSpeech = Date() }
+        }
     }
 
     @Published var folderEmoji: [String: String] = [:]
@@ -308,7 +315,15 @@ final class Model: ObservableObject {
         part += 1
         lastSpeech = nil; micSeen = false; micEmptySince = nil; callEnding = false
         Store.updateMeta(id, ["recording": true])  // stays set if the app dies mid-meeting, see interrupted()
-        status = .recording; detail = ""; hearing = []; micMuted = false; turns = []; talking = []; seenPeople = [:]; renamed = [:]; settled = [:]
+        status = .recording; detail = ""; hearing = []; micMuted = false; callMuted = false; turns = []; talking = []; seenPeople = [:]; renamed = [:]; settled = [:]
+        deleted = []; selfName = nil
+        guard Engine.downloaded else { status = .done; Store.updateMeta(id, ["recording": false]); showSetup = true; return fail("The speech models are not downloaded yet: finish the setup first") }
+        Engine.shared.retain()
+        if Agenda.enabled, let e = Agenda.current() {
+            var meta: [String: Any] = ["calendar": ["title": e.title, "invited": e.invited]]
+            if Store.title(id) == nil, !e.title.isEmpty { meta["title"] = ["en": e.title] }
+            Store.updateMeta(id, meta)
+        }
         if ScreenNames.enabled {
             let s = ScreenNames()
             s.onLook = { [weak self] in self?.addLook(id, $0) }
@@ -325,15 +340,14 @@ final class Model: ObservableObject {
         rec.onTurns = { [weak self] new in self?.addTurns(id, new) }
         recorder = rec
         reload()
-        guard let model = Store.speechModel else { showSetup = true; return fail("The speech model is not downloaded yet: finish the setup first") }
-        Task { await rec.start(model: model) }
+        Task { await rec.start() }
     }
 
     private func addWindow(_ id: String, _ src: String, _ w: Int, _ final: Bool, _ segs: [Segment]) {
         guard activeId == id else { return }
         if !segs.isEmpty { lastSpeech = Date() }
         lines = labelled(replaceWindow(lines, src: src, w: w, part: part, final: final, segments: segs))
-        if final { Store.saveLines(id, lines) }
+        if final { Store.saveLinesSoon(id, lines) }
     }
 
     /// Who said each "Them" line: the diarized voice, else the person the call window showed talking then. A line that shows a
@@ -357,14 +371,31 @@ final class Model: ObservableObject {
     /// What the call window showed: who is in the call, and who is talking, which can name a voice or a line.
     private func addLook(_ id: String, _ look: ScreenLook) {
         guard activeId == id, status == .recording else { return }
-        for p in look.people { seenPeople[p, default: 0] += 1 }
-        // The call app shows the user as talking too: while the microphone hears speech, a name shown talking may be the user's.
-        guard !look.talking.isEmpty, !hearing.contains("mic") else { return }
-        talking += look.talking.map { (t: look.t, name: $0) }
+        if let me = look.me { selfName = me }
+        if let muted = look.muted, Model.followCallMute { callMuted = muted }
+        for p in look.people where p != selfName { seenPeople[p, default: 0] += 1 }
+        // The call app shows the user as talking too. Their own name is left out; when it is not known, a name shown talking while the
+        // microphone hears speech may be the user's, so that look is not used.
+        let shown = look.talking.filter { $0 != selfName }
+        guard !shown.isEmpty, selfName != nil || !hearing.contains("mic") else { return }
+        talking += shown.map { (t: look.t, name: $0) }
         let before = lines
         lines = labelled(lines)
-        if lines != before { Store.saveLines(id, lines) }
+        if lines != before { Store.saveLinesSoon(id, lines) }
         updateNames(id)
+    }
+
+    /// Settings: what the user says while muted in Zoom is not transcribed. On unless turned off.
+    static var followCallMute: Bool {
+        get { UserDefaults.standard.object(forKey: "followCallMute") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "followCallMute") }
+    }
+
+    /// Settings: after the call, the whole recording is recognised again with full context and its speakers told apart again, before the
+    /// notes are written. On unless turned off.
+    static var polishEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "polish") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "polish") }
     }
 
     /// Keeps what the call window showed with the meeting: names for the voices it settled (where none was given), and who was in
@@ -386,7 +417,7 @@ final class Model: ObservableObject {
         turns += new.map { Turn(start: $0.start, end: $0.end, spk: "\(part)-\($0.spk)") }
         let before = lines
         lines = labelled(lines)
-        if lines != before { Store.saveLines(id, lines) }
+        if lines != before { Store.saveLinesSoon(id, lines) }
         if !talking.isEmpty { updateNames(id) }
     }
 
@@ -420,16 +451,79 @@ final class Model: ObservableObject {
         callEnding = false
         screen?.stop(); screen = nil
         detail = "\(reason): finishing the last sentences"
-        rec.stop { [self] in  // the recorder finalises its last windows first
+        rec.stop { [self] tapes in  // the recorder finalises its last windows first
             recorder = nil
             hearing = []
+            callMuted = false
             lines = lines.map { var l = $0; l.final = true; return l }  // a window cut off by the stop is as final as it gets
             Store.saveLines(id, lines)
             saveScreenNames(id)
-            Store.write(transcriptText(lines, names: Store.speakers(id)) + "\n", Store.dir(id).appendingPathComponent("transcript.md"))
             Store.updateMeta(id, ["recording": false])
-            summarize()
+            guard Model.polishEnabled, tapes.mic.seconds + tapes.sys.seconds >= 3 else { return wrapUp(id) }
+            detail = "making the transcript better"
+            polish(id, tapes)
         }
+    }
+
+    /// The second pass: the whole recording again, now with full context, and the other side's voices told apart over the whole call (no
+    /// limit of 4). It replaces this recording's live lines when it lost no text; names given to voices carry over.
+    private func polish(_ id: String, _ tapes: Tapes) {
+        let part = self.part, live = lines.filter { $0.part == part }, deleted = self.deleted, talking = self.talking
+        let invited = (Store.meta(id)["calendar"] as? [String: Any])?["invited"] as? [String] ?? []
+        let people = livePeople.count
+        Task.detached(priority: .userInitiated) { [self] in
+            let started = Date()
+            var fresh: [Line] = []
+            var ok = true
+            for (src, tape) in [("mic", tapes.mic), ("sys", tapes.sys)] where tape.seconds >= 1 && !tape.full {
+                guard let tokens = try? await Engine.shared.transcribe(tape.floats) else { ok = false; break }
+                fresh += tapeLines(tokens, src: src, part: part, clock: tape.clock)
+            }
+            for (src, tape) in [("mic", tapes.mic), ("sys", tapes.sys)] where tape.full { fresh += live.filter { $0.src == src } }  // too long to redo
+            var sysTurns: [Turn] = []
+            if ok, tapes.sys.seconds >= 3, !tapes.sys.full {
+                let most = max(people, invited.count) > 0 ? max(people, invited.count) + 1 : nil
+                if let segs = try? await Engine.shared.diarize(tapes.sys.floats, maxSpeakers: most) {
+                    sysTurns = segs.map { Turn(start: Int(tapes.sys.clock.ms(Int($0.start * 16000))), end: Int(tapes.sys.clock.ms(Int($0.end * 16000))), spk: $0.spk) }
+                }
+            }
+            fresh = dropEcho(withoutDeleted(fresh, deleted).sorted { $0.t < $1.t })
+            if !sysTurns.isEmpty {
+                let carried = carryVoices(live: live, turns: sysTurns)
+                let turns = sysTurns.map { Turn(start: $0.start, end: $0.end, spk: carried[$0.spk] ?? "\(part)-\($0.spk)") }
+                fresh = labelFromScreen(labelSpeakers(fresh, turns), talking)
+            } else {
+                fresh = labelFromScreen(labelSpeakers(fresh, self.turnsOf(live)), talking)
+            }
+            let keep = ok && !fresh.isEmpty && polishKeeps(live: live, fresh: fresh)
+            log.info("second pass: \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s, \(keep ? "used" : "dropped")")
+            DispatchQueue.main.async { [self] in
+                if keep, activeId == id {
+                    lines = (lines.filter { $0.part != part } + fresh).sorted { $0.t < $1.t }
+                    Store.saveLines(id, lines)
+                }
+                wrapUp(id)
+            }
+        }
+    }
+
+    /// Live voices as turns, for lines of the second pass when the speakers could not be told apart again.
+    private func turnsOf(_ live: [Line]) -> [Turn] {
+        let sys = live.filter { $0.src == "sys" && $0.spk != nil }
+        return sys.enumerated().map { i, l in Turn(start: l.t, end: i + 1 < sys.count ? sys[i + 1].t : l.t + 4000, spk: l.spk!) }
+    }
+
+    /// After the recording (and the second pass): names from the calendar, the transcript file, the summary.
+    private func wrapUp(_ id: String) {
+        guard activeId == id else { return }
+        // A 1:1 on the calendar with one voice on the other side: that voice is the other person.
+        let invited = (Store.meta(id)["calendar"] as? [String: Any])?["invited"] as? [String] ?? []
+        let voices = Array(Set(lines.filter { $0.src == "sys" }.compactMap(\.spk))).filter { !$0.hasPrefix("@") }
+        let given = Store.speakers(id)
+        for (spk, name) in oneOnOne(invited: invited, voices: voices) where given[spk] == nil { Store.nameSpeaker(id, spk, name) }
+        Store.write(transcriptText(lines, names: Store.speakers(id)) + "\n", Store.dir(id).appendingPathComponent("transcript.md"))
+        Engine.shared.release()
+        summarize()
     }
 
     /// Redo the summary of any meeting, or make the first one for an interrupted meeting.
@@ -495,6 +589,7 @@ final class Model: ObservableObject {
         screen?.stop()
         rec.shutdown()
         Store.saveLines(id, lines.map { var l = $0; l.final = true; return l })
+        Engine.shared.release()
     }
 
     /// Meetings dropped on a folder in the sidebar (nil: No Folder) move there: out of the folder the list shows (and its subfolders), or,
@@ -682,7 +777,7 @@ final class Model: ObservableObject {
     func deleteLine(_ id: String, _ line: Line) {
         guard line.final else { return }
         let rest = (id == activeId ? lines : Store.lines(id)).filter { $0 != line }
-        if id == activeId { lines = rest }
+        if id == activeId { lines = rest; if status == .recording || status == .finalizing { deleted.append(line) } }
         Store.saveLines(id, rest)
         let md = Store.dir(id).appendingPathComponent("transcript.md")
         if FileManager.default.fileExists(atPath: md.path) { Store.write(transcriptText(rest.filter(\.final), names: Store.speakers(id)) + "\n", md) }

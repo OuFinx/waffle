@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds Waffle from source on this Mac and puts it in /Applications. Run it again any time to update (after `git pull`).
-# Needs: a Mac with Apple Silicon, macOS 15 or newer, Xcode Command Line Tools and Homebrew. Everything else it sets up itself.
+# Needs: a Mac with Apple Silicon, macOS 15 or newer and the Xcode Command Line Tools. Everything else it sets up itself.
 set -e
 cd "$(dirname "$0")"
 
@@ -11,11 +11,6 @@ bold "Waffle: checking this Mac"
 [ "$(uname -m)" = arm64 ] || fail "Waffle needs a Mac with Apple Silicon (M1 or newer)."
 [ "$(sw_vers -productVersion | cut -d. -f1)" -ge 15 ] || fail "Waffle needs macOS 15 Sequoia or newer."
 xcode-select -p >/dev/null 2>&1 || { xcode-select --install; fail "Install the Command Line Tools in the window that opened, then run ./install.sh again."; }
-command -v brew >/dev/null 2>&1 || fail "Waffle needs Homebrew: install it from https://brew.sh, then run ./install.sh again."
-
-bold "Installing the speech library (whisper.cpp from Homebrew)"
-brew list whisper-cpp >/dev/null 2>&1 || brew install whisper-cpp
-
 # A local signing certificate keeps the Microphone and System Audio permissions across updates. Free, and it never leaves this Mac.
 bold "Setting up local code signing"
 ./make-signing-identity.sh
