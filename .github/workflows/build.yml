@@ -1,9 +1,17 @@
-# Builds the app and runs the self-check on every push and pull request.
+# Builds the app and runs the self-check on pushes to main, or by hand (Actions → build → Run workflow).
+# macOS minutes count ten times against the monthly allowance, so other branches, changes to the docs alone, and runs
+# overtaken by a newer push are skipped.
 name: build
 
 on:
   push:
-  pull_request:
+    branches: [main]
+    paths-ignore: ['docs/**', '**/*.md', 'Tools/eval/**']
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -29,9 +37,4 @@ jobs:
         # Speech made with macOS's voices in several languages and rates, recognized whole, live through the windows, and as the pass
         # after a call. Slow on CI (no Neural Engine), so it runs once the build is green.
         run: swift run -c release WaffleCheck
-        timeout-minutes: 40
-      - name: Check with Parakeet v3 (for comparison)
-        if: always()
-        continue-on-error: true
-        run: WAFFLE_ASR=v3 swift run -c release WaffleCheck
         timeout-minutes: 40
