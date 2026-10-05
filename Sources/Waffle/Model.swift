@@ -352,7 +352,7 @@ final class Model: ObservableObject {
     /// Who said each "Them" line: the diarized voice, else the person the call window showed talking then. A line that shows a
     /// person's name keeps it (see keepNamed).
     private func labelled(_ lines: [Line]) -> [Line] {
-        let (out, names) = keepNamed(lines, labelFromScreen(labelSpeakers(lines, turns), talking), live.names)
+        let (out, names) = keepNamed(lines, labelFromScreen(labelSpeakers(lines, turns), talking, names: live.names), live.names)
         if names != live.names, let id = activeId {
             for (spk, name) in names where live.names[spk] == nil { settled[spk] = name }
             updateNames(id)
@@ -469,7 +469,7 @@ final class Model: ObservableObject {
     /// as recognizing each utterance on its own. Names given to voices carry over; the live voices stay when the whole-call ones tell
     /// fewer voices apart (similar voices lumped together on a short call).
     private func polish(_ id: String, _ tapes: Tapes) {
-        let part = self.part, live = lines.filter { $0.part == part }, talking = self.talking, tape = tapes.sys
+        let part = self.part, live = lines.filter { $0.part == part }, talking = self.talking, tape = tapes.sys, names = self.live.names
         let invited = (Store.meta(id)["calendar"] as? [String: Any])?["invited"] as? [String] ?? []
         let people = livePeople.count
         Task.detached(priority: .userInitiated) { [self] in
@@ -482,7 +482,7 @@ final class Model: ObservableObject {
             var relabeled = live
             if use {
                 let carried = carryVoices(live: live, turns: turns)
-                relabeled = labelFromScreen(labelSpeakers(live, turns.map { Turn(start: $0.start, end: $0.end, spk: carried[$0.spk] ?? "\(part)-\($0.spk)") }), talking)
+                relabeled = labelFromScreen(labelSpeakers(live, turns.map { Turn(start: $0.start, end: $0.end, spk: carried[$0.spk] ?? "\(part)-\($0.spk)") }), talking, names: names)
             }
             log.info("speakers after the call: \(Set(turns.map(\.spk)).count) voices in \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s, \(use ? "used" : "kept the live ones")")
             DispatchQueue.main.async { [self] in

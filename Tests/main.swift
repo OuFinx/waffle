@@ -128,6 +128,11 @@ assert(kept.lines.map(\.spk) == ["1-1", "1-3", "1-2", "@Ivan"], "\(kept.lines.ma
 assert(kept.names == ["1-1": "Oleg", "1-3": "Maryna"], "\(kept.names)")
 assert(keepNamed([said(0, "@Oleg")], [said(0, "1-2")], ["1-1": "Oleg"]).lines.map(\.spk) == ["@Oleg"])  // the name is another voice's: the line keeps it
 assert(keepNamed([said(0, "1-1")], [said(0, "1-2")], ["1-1": "Oleg", "1-2": "Oleg"]).lines.map(\.spk) == ["1-2"])  // same name shown either way
+// more people than the live diarizer's 4 voices: Ivan shares Oleg's voice, the call window shows him talking and takes the line from it
+let shared = [said(0, "1-1"), said(5000, "1-1"), said(6000, "1-1"), said(9000, "1-1")]
+let byWindow = labelFromScreen(shared, [(1500, "Oleg"), (5500, "Oleg"), (7500, "Ivan"), (10200, "Oleg"), (10500, "Ivan")], names: ["1-1": "Oleg"])
+assert(byWindow.map(\.spk) == ["1-1", "1-1", "@Ivan", "1-1"], "\(byWindow.map(\.spk))")  // 0: Oleg, his name already; 5000: no look; 9000: both
+assert(keepNamed(shared, byWindow, ["1-1": "Oleg"]).lines.map(\.spk) == ["1-1", "1-1", "@Ivan", "1-1"] && keepNamed([said(0, "1-1")], [said(0, nil)], ["1-1": "Oleg"]).lines.map(\.spk) == ["1-1"])
 
 assert(renamePeople(["Kabak Shamnmss", "Oleg Petrenko", "Babak Shammas"], ["Kabak Shamnmss": "Babak Shammas"]) == ["Babak Shammas", "Oleg Petrenko"])
 
