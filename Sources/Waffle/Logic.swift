@@ -657,16 +657,27 @@ func screenSpeakers(_ turns: [Turn], _ talking: [(t: Int, name: String)]) -> [St
     }
 }
 
-/// "Them" lines that no diarized voice covers get the person the call window showed as the only one talking around then (from 1 s
-/// before the line to 4 s after), as the voice "@Name". `talking` is in time order.
-func labelFromScreen(_ lines: [Line], _ talking: [(t: Int, name: String)]) -> [Line] {
+/// Who the call window showed talking goes before the diarized voice: the live diarizer tells apart at most 4 voices, so on a bigger call
+/// several people share one, and its name. A "Them" line gets the person the call window showed as the only one talking during it, as
+/// the voice "@Name": with no voice, from 1 s before the line to 4 s after; with a voice that shows another name (`names`), from 1 s
+/// after the line starts (the app shows a voice a moment late) until 1 s after the next line starts, at most 10 s. `talking` is in time order.
+func labelFromScreen(_ lines: [Line], _ talking: [(t: Int, name: String)], names: [String: String] = [:]) -> [Line] {
     guard !talking.isEmpty else { return lines }
+    func only(_ from: Int, _ to: Int) -> String? {
+        var j = firstIndex(talking.count) { talking[$0].t >= from }, near = Set<String>()
+        while j < talking.count, talking[j].t <= to { near.insert(talking[j].name); j += 1 }
+        return near.count == 1 ? near.first : nil
+    }
     var out = lines
-    for i in out.indices where out[i].src == "sys" && (out[i].spk == nil || out[i].spk!.hasPrefix("@")) {
+    let sys = lines.indices.filter { lines[$0].src == "sys" }
+    for (k, i) in sys.enumerated() {
         let t = out[i].t
-        var j = firstIndex(talking.count) { talking[$0].t >= t - 1000 }, near = Set<String>()
-        while j < talking.count, talking[j].t <= t + 4000 { near.insert(talking[j].name); j += 1 }
-        if near.count == 1 { out[i].spk = "@" + near.first! }
+        if let spk = out[i].spk, !spk.hasPrefix("@") {
+            let end = k + 1 < sys.count ? min(lines[sys[k + 1]].t, t + 9000) + 1000 : t + 4000
+            if end > t + 1000, let name = only(t + 1000, end), names[spk] != name { out[i].spk = "@" + name }
+        } else if let name = only(t - 1000, t + 4000) {
+            out[i].spk = "@" + name
+        }
     }
     return out
 }
@@ -690,7 +701,8 @@ func keepNamed(_ before: [Line], _ after: [Line], _ names: [String: String]) -> 
     for i in out.indices where i < before.count && before[i].t == after[i].t && before[i].src == after[i].src && before[i].spk != after[i].spk {
         guard let old = shown(before[i].spk) else { continue }
         if before[i].spk!.hasPrefix("@"), let v = after[i].spk, !v.hasPrefix("@"), names[v] == nil, !names.values.contains(old) { names[v] = old }
-        if shown(after[i].spk) != old { out[i].spk = before[i].spk }
+        // The call window may take a line from a voice's name (see labelFromScreen), not from another name it showed.
+        if shown(after[i].spk) != old && !(after[i].spk?.hasPrefix("@") == true && !before[i].spk!.hasPrefix("@")) { out[i].spk = before[i].spk }
     }
     return (out, names)
 }
