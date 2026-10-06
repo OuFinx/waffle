@@ -627,40 +627,49 @@ func rosterNames(_ texts: [String]) -> [String] {
     return out
 }
 
-/// Names for the voices of "Them" from who the call window showed as talking (t: epoch ms) during their turns. A voice gets a name when
-/// it was shown in at least 3 looks and two thirds of the voice's looks; a name two voices would get goes to neither.
-func screenSpeakers(_ turns: [Turn], _ talking: [(t: Int, name: String)]) -> [String: String] {
-    guard !turns.isEmpty, !talking.isEmpty else { return [:] }
+/// Names for the voices of "Them" from who the call window showed as talking (t: epoch ms) during their turns. A look counts once,
+/// split between the names it shows. A voice gets a name when it was shown in at least 3 looks and two thirds of the voice's looks; a
+/// name two voices would get goes to neither. A voice keeps the name it has (`kept`) while that name is still its top one, so names do
+/// not flip between a name, "Speaker 2" and "Them", yet an early wrong name gives way when another one clearly wins the voice.
+/// The name is the voice's, never a single line's: one person then has one label everywhere (as Granola and Vexa do it).
+func screenSpeakers(_ turns: [Turn], _ talking: [(t: Int, name: String)], kept: [String: String] = [:]) -> [String: String] {
+    guard !turns.isEmpty, !talking.isEmpty else { return kept }
     let turns = zip(turns, turns.dropFirst()).allSatisfy { $0.start <= $1.start } ? turns : turns.sorted { $0.start < $1.start }
     let longest = turns.map { $0.end - $0.start }.max() ?? 0, lag = 1000  // the app shows a voice a moment after it starts
-    var votes: [String: [String: Int]] = [:]
+    let shownAt = Dictionary(grouping: talking, by: \.t).mapValues { Double($0.count) }
+    var votes: [String: [String: Double]] = [:]
     for s in talking {
         var j = firstIndex(turns.count) { turns[$0].start >= s.t - longest - lag }
         while j < turns.count, turns[j].start <= s.t {
-            if s.t < turns[j].end + lag { votes[turns[j].spk, default: [:]][s.name, default: 0] += 1 }
+            if s.t < turns[j].end + lag { votes[turns[j].spk, default: [:]][s.name, default: 0] += 1 / shownAt[s.t]! }
             j += 1
         }
     }
+    func top(_ v: [String: Double]) -> (key: String, value: Double)? { v.max { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) } }
     var out: [String: String] = [:]
     for (spk, v) in votes {
         let total = v.values.reduce(0, +)
-        if let top = v.max(by: { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) }), top.value >= 3, top.value * 3 >= total * 2 { out[spk] = top.key }
+        if let top = top(v), top.value >= 3, top.value * 3 >= total * 2 { out[spk] = top.key }
     }
     // A name two voices would get goes to both when they never talk at the same time (one person the diarizer split in two), else to neither.
     let byName = Dictionary(grouping: out.keys) { out[$0]! }
     func overlap(_ a: String, _ b: String) -> Bool {
         turns.contains { x in x.spk == a && turns.contains { y in y.spk == b && max(x.start, y.start) < min(x.end, y.end) } }
     }
-    return out.filter { spk, name in
+    var named = out.filter { spk, name in
         let all = byName[name] ?? []
         return all.count == 1 || !all.contains { $0 != spk && overlap($0, spk) }
     }
+    for (spk, name) in kept where named[spk] == nil && (votes[spk].flatMap(top)?.key ?? name) == name { named[spk] = name }
+    return named
 }
 
-/// Who the call window showed talking goes before the diarized voice: the live diarizer tells apart at most 4 voices, so on a bigger call
-/// several people share one, and its name. A "Them" line gets the person the call window showed as the only one talking during it, as
-/// the voice "@Name": with no voice, from 1 s before the line to 4 s after; with a voice that shows another name (`names`), from 1 s
-/// after the line starts (the app shows a voice a moment late) until 1 s after the next line starts, at most 10 s. `talking` is in time order.
+/// Who the call window showed talking goes before the diarized voice only where the voice can not say it: the live diarizer tells apart
+/// at most 4 voices, so on a bigger call several people share one, and its name. A "Them" line gets the person the call window showed as
+/// the only one talking during it, as the voice "@Name": with no voice, from 1 s before the line to 4 s after; with a voice named
+/// another name (`names`), from 1 s after the line starts (the app shows a voice a moment late) until 1 s after the next line starts, at
+/// most 10 s. A voice with no name yet is left alone: naming the lines a look happened to fall on showed one person as a name on some
+/// lines and "Speaker 1" on the rest; the voice gets the name from the looks instead (screenSpeakers). `talking` is in time order.
 func labelFromScreen(_ lines: [Line], _ talking: [(t: Int, name: String)], names: [String: String] = [:]) -> [Line] {
     guard !talking.isEmpty else { return lines }
     func only(_ from: Int, _ to: Int) -> String? {
@@ -674,20 +683,11 @@ func labelFromScreen(_ lines: [Line], _ talking: [(t: Int, name: String)], names
         let t = out[i].t
         if let spk = out[i].spk, !spk.hasPrefix("@") {
             let end = k + 1 < sys.count ? min(lines[sys[k + 1]].t, t + 9000) + 1000 : t + 4000
-            if end > t + 1000, let name = only(t + 1000, end), names[spk] != name { out[i].spk = "@" + name }
+            if end > t + 1000, let own = names[spk], let name = only(t + 1000, end), own != name { out[i].spk = "@" + name }
         } else if let name = only(t - 1000, t + 4000) {
             out[i].spk = "@" + name
         }
     }
-    return out
-}
-
-/// Names of voices that stay once given: the ones settled so far, plus what the call window names now for a voice without a name, when
-/// no other voice has that name. A name never moves to another voice or goes away as more looks come in.
-func settleNames(_ settled: [String: String], _ fresh: [String: String]) -> [String: String] {
-    var out = settled
-    let shared = Set(Dictionary(grouping: fresh.values) { $0 }.filter { $0.value.count > 1 }.keys)  // one person split in two voices
-    for (spk, name) in fresh.sorted(by: { $0.key < $1.key }) where out[spk] == nil && (!out.values.contains(name) || shared.contains(name)) { out[spk] = name }
     return out
 }
 

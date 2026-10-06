@@ -151,7 +151,7 @@ final class Model: ObservableObject {
     private var talking: [(t: Int, name: String)] = []  // who the call window showed as talking, in time order
     private var seenPeople: [String: Int] = [:]  // names the call window showed, and in how many looks
     private var renamed: [String: String] = [:]  // names read from the call window that the user corrected while recording: old -> new
-    private var settled: [String: String] = [:]  // names the call window gave to voices in this recording; they stay, see settleNames
+    private var settled: [String: String] = [:]  // names the call window gave to voices in this recording, see screenSpeakers
     private var lastSpeech: Date?, micSeen = false, micEmptySince: Date?
     private var toastTimer: Timer?
     private var selfName: String?  // the user's own name as the call window shows it
@@ -360,10 +360,10 @@ final class Model: ObservableObject {
         return out
     }
 
-    /// The names of the active meeting's voices: the ones the user (or a summary) gave, else what the call window settled. Once a
-    /// voice has a name it keeps it, so the transcript does not flip between a name, "Speaker 2" and "Them" as more looks come in.
+    /// The names of the active meeting's voices: the ones the user (or a summary) gave, else what the call window settled. A voice
+    /// keeps its name while that name still leads its looks, so the transcript does not flip between a name, "Speaker 2" and "Them".
     private func updateNames(_ id: String) {
-        settled = settleNames(settled, screenSpeakers(turns, talking))
+        settled = screenSpeakers(turns, talking, kept: settled)
         live.names = settled.merging(Store.speakers(id)) { $1 }
     }
 
@@ -376,7 +376,10 @@ final class Model: ObservableObject {
         // The call app shows the user as talking too. Their own name is left out; when it is not known, a name shown talking while the
         // microphone hears speech may be the user's, so that look is not used.
         let shown = look.talking.filter { $0 != selfName }
-        guard !shown.isEmpty, selfName != nil || !hearing.contains("mic") else { return }
+        guard !shown.isEmpty, selfName != nil || !hearing.contains("mic") else {
+            if !shown.isEmpty { log.info("look not used: own name unknown while the microphone hears speech") }
+            return
+        }
         talking += shown.map { (t: look.t, name: $0) }
         let before = lines
         lines = labelled(lines)

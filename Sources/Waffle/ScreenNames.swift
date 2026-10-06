@@ -72,6 +72,8 @@ final class ScreenNames {
         let me = selfName(texts)
         let talking = speakingNames(texts) + framed.filter { !speakingNames(texts).contains($0) }
         let look = ScreenLook(t: Int(now * 1000), people: rosterNames(texts), talking: talking, me: me, muted: muted)
+        // Counts only, no names: shows which way of reading the call window works when names do not come (`log show --info --predicate 'subsystem == "io.github.oufinx.waffle"'`).
+        log.info("look: accessibility \(AXIsProcessTrusted()), \(texts.count) texts, \(look.people.count) people, talking \(speakingNames(texts).count) by labels and \(framed.count) by frame, own name \(me != nil)")
         return look.people.isEmpty && look.talking.isEmpty && muted == nil ? nil : look
     }
 
