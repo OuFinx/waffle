@@ -344,7 +344,10 @@ func randomFolderEmoji(avoiding used: some Collection<String> = [String]()) -> S
 
 // MARK: prompts
 
-/// Rules for every summary, whatever the template: who is who, English, no invented facts.
+/// The languages a summary can be written in (Settings and Regenerate). Russian is left out on purpose.
+let summaryLanguages = ["English", "Ukrainian", "Polish", "German", "French", "Spanish", "Italian", "Portuguese"]
+
+/// Rules for every summary, whatever the template: who is who, the notes' language, no invented facts.
 let summaryBase = """
 You turn a meeting transcript and the user's own rough notes into meeting notes.
 Speaker "Me" is the user (their microphone). Every other label is someone else on the call: a name, "Speaker 2" (a voice told apart by sound, name unknown), or "Them" (everyone else together).
@@ -352,7 +355,7 @@ A label that first shows up partway through is a new voice joining the conversat
 If the input lists the people seen in the call window (the names Zoom or Teams showed), they are most likely the people in the call (the list can hold a stray non-name): spell their names as listed, and use them to tell who a voice is when the conversation supports it.
 If the input has the calendar event, its title is what the meeting was planned as and its invited people are likely in the call (not all of them may have joined); spell their names as listed.
 The transcript is machine-made: fix obvious recognition errors from context, never invent facts.
-The meeting may be in any language, or several. Always write the notes in English; keep names, product names and ticket numbers as spoken.
+The meeting may be in any language, or several. Always write the notes in LANGUAGE; keep names, product names and ticket numbers as spoken.
 The user's notes show what they care about: make sure those topics are covered and expanded with details from the transcript.
 Use 24-hour time only, never AM/PM. Resolve relative dates ("next Monday") using the meeting date given in the input. No intro and no closing remarks.
 """
@@ -370,8 +373,8 @@ then the notes, in Markdown. In the notes, call people by those names.
 """
 
 /// The system prompt for a meeting's notes: the fixed rules, the template's structure and style, the fixed output layout.
-func summarySystem(template: Template) -> String {
-    summaryBase + "\n\nStructure and style (template \u{201C}\(template.name)\u{201D}):\n" + template.text + "\n\n" + summaryFormat
+func summarySystem(template: Template, language: String = "English") -> String {
+    summaryBase.replacingOccurrences(of: "LANGUAGE", with: language) + "\n\nStructure and style (template \u{201C}\(template.name)\u{201D}):\n" + template.text + "\n\n" + summaryFormat
 }
 
 // MARK: summary templates

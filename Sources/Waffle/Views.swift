@@ -936,7 +936,7 @@ struct MeetingView: View {
                 if tab == .summary {
                     if status == .done && !model.busy && !lines.isEmpty {
                         // Write it again, with the same template or another one. The button shows the template of the current summary.
-                        RegenerateButton(used: model.library.template(usedTemplate), first: summary == nil) { model.regenerate(id, template: $0) }
+                        RegenerateButton(used: model.library.template(usedTemplate), language: Model.summaryLanguage(id), first: summary == nil) { model.regenerate(id, template: $0, language: $1) }
                     }
                     if let summary {  // Copy stays at the right edge
                         Button(copied ? "Copied" : "Copy") { copy(summary) }.help("Copy as rich text, ready for Slack or email")
@@ -1082,13 +1082,14 @@ struct MicButton: View {
     }
 }
 
-/// Two parts, like the Report button: Regenerate writes the summary again in the same template; the template's emoji next to it opens
-/// the list to write it in another one. Both ask first.
+/// Two parts, like the Report button: Regenerate writes the summary again in the same template and language; the template's emoji next
+/// to it opens the list to write it in another template or language. Both ask first.
 struct RegenerateButton: View {
     @EnvironmentObject var model: Model
     let used: Template
+    let language: String  // of the current summary
     let first: Bool  // no summary yet: nothing to replace, so no question
-    let run: (String) -> Void
+    let run: (String, String) -> Void  // template id, language
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1103,12 +1104,17 @@ struct RegenerateButton: View {
                         Button { ask(t) } label: { if t.id == used.id { Label(t.label, systemImage: "checkmark") } else { Text(t.label) } }
                     }
                 }
+                Section("Language") {
+                    ForEach(summaryLanguages, id: \.self) { l in
+                        Button { ask(used, l) } label: { if l == language { Label(l, systemImage: "checkmark") } else { Text(l) } }
+                    }
+                }
             } label: {
                 HStack(spacing: 3) { Text(used.emoji ?? "📝"); Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary) }
                     .padding(.leading, 7).padding(.trailing, 9).padding(.vertical, 4).contentShape(Rectangle())
             }
             .menuStyle(.button).menuIndicator(.hidden).fixedSize()
-            .help("Template: \(used.name). Click for another one")
+            .help("Template: \(used.name), in \(language). Click for another template or language")
         }
         .buttonStyle(.plain)
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
@@ -1117,9 +1123,10 @@ struct RegenerateButton: View {
     }
 
     /// The alert waits for the menu to close first: a modal opened while a menu is still tracking can swallow the click.
-    func ask(_ t: Template) {
+    func ask(_ t: Template, _ l: String? = nil) {
+        let l = l ?? language
         DispatchQueue.main.async {
-            if first || confirm("Write the summary again as \u{201C}\(t.name)\u{201D}?", "The AI writes a new summary from the transcript and your notes. The current one is replaced here (the old file stays in the meeting folder).", "Regenerate") { run(t.id) }
+            if first || confirm("Write the summary again as \u{201C}\(t.name)\u{201D} in \(l)?", "The AI writes a new summary from the transcript and your notes. The current one is replaced here (the old file stays in the meeting folder).", "Regenerate") { run(t.id, l) }
         }
     }
 }
@@ -1582,10 +1589,20 @@ struct TemplatesSettings: View {
     @ObservedObject var model = Model.shared
     @State var open: Template?   // shown in the sheet
     @State var isNew = false
+    @State var language = Model.summaryLanguage
 
     var lib: TemplateLibrary { model.library }
 
     var body: some View {
+        Section {
+            Picker("Write summaries in", selection: $language) { ForEach(summaryLanguages, id: \.self) { Text($0).tag($0) } }
+                .onChange(of: language) { Model.summaryLanguage = language }
+        } header: {
+            Text("Summary language")
+        } footer: {
+            Text("The notes are written in this language whatever language the meeting was in. Regenerate on a meeting can write them in another one. The transcript stays in the language people spoke.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
         Section {
             Picker("Default for meeting notes", selection: Binding(get: { lib.defaultId }, set: { model.setDefaultTemplate($0) })) {
                 ForEach(lib.all) { Text($0.label).tag($0.id) }
@@ -1593,7 +1610,7 @@ struct TemplatesSettings: View {
         } header: {
             Text("Summary templates")
         } footer: {
-            Text("The default shapes the notes of every meeting. Regenerate on a meeting can use any other template, and each folder picks one for its updates. Waffle always adds its own rules: English, who is who, no invented facts.")
+            Text("The default shapes the notes of every meeting. Regenerate on a meeting can use any other template, and each folder picks one for its updates. Waffle always adds its own rules: the summary language, who is who, no invented facts.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         Section("Built-in") {

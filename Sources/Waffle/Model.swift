@@ -517,25 +517,35 @@ final class Model: ObservableObject {
 
     /// Redo the summary of any meeting, or make the first one for an interrupted meeting.
     /// Redo the summary (with another template, or the one it had), or make the first one for an interrupted meeting.
-    func regenerate(_ id: String, template: String? = nil) {
+    func regenerate(_ id: String, template: String? = nil, language: String? = nil) {
         guard activate(id) else { return fail("Not now: a meeting is recording or being processed") }
-        summarize(template: template)
+        summarize(template: template, language: language)
     }
 
-    /// The meeting's notes, with this template, else the one it had before, else the default.
-    private func summarize(template: String? = nil) {
+    /// Settings: the language summaries are written in, whatever language the meeting was in.
+    static var summaryLanguage: String {
+        get { UserDefaults.standard.string(forKey: "summaryLanguage").flatMap { summaryLanguages.contains($0) ? $0 : nil } ?? "English" }
+        set { UserDefaults.standard.set(newValue, forKey: "summaryLanguage") }
+    }
+
+    /// The language of a meeting's current summary, else the one in Settings.
+    static func summaryLanguage(_ id: String) -> String { Store.meta(id)["language"] as? String ?? summaryLanguage }
+
+    /// The meeting's notes, with this template (and language), else the one it had before, else the default.
+    private func summarize(template: String? = nil, language: String? = nil) {
         guard let id = activeId else { return }
         status = .summarizing; detail = "writing the summary"
         reload()
         let input = "\(promptDateLine(id))\n\n\(Store.foldersText(id))\n\n\(Store.context(id, lines: lines))"
         let tpl = library.template(template ?? Store.meta(id)["template"] as? String ?? library.defaultId)
-        let system = summarySystem(template: tpl)
+        let lang = language ?? Model.summaryLanguage(id)
+        let system = summarySystem(template: tpl, language: lang)
         DispatchQueue.global().async {
             do {
                 let (title, folders, speakers, notes) = parseSummary(try AI.ask(system: system, prompt: "Make the meeting notes.", context: input, cwd: Store.dir(id)))
                 Store.addSummary(id, notes)
                 let known = Store.allFolders()
-                var meta: [String: Any] = ["recording": false, "template": tpl.id, "tags": Set(Store.tags(id) + (folders ?? []).filter(known.contains)).sorted { $0.lowercased() < $1.lowercased() }]  // only existing folders
+                var meta: [String: Any] = ["recording": false, "template": tpl.id, "language": lang, "tags": Set(Store.tags(id) + (folders ?? []).filter(known.contains)).sorted { $0.lowercased() < $1.lowercased() }]  // only existing folders
                 let planned = (Store.meta(id)["calendar"] as? [String: Any])?["title"] as? String ?? ""
                 if let title, !title.isEmpty, planned.isEmpty { meta["title"] = ["en": title] }  // the calendar's title is the one people know
                 Store.updateMeta(id, meta)

@@ -54,6 +54,7 @@ assert(firstIndex(5) { $0 >= 3 } == 3 && firstIndex(5) { _ in false } == 5 && fi
 // a summary prompt is the fixed rules, the template, then the fixed title / folders / speakers layout
 let haiku = Template(id: "x", name: "Haiku", text: "Write haiku.")
 assert(summarySystem(template: haiku).hasPrefix("You turn a meeting") && summarySystem(template: haiku).contains("Write haiku.") && summarySystem(template: haiku).hasSuffix("call people by those names."))
+assert(summarySystem(template: haiku).contains("notes in English;") && summarySystem(template: haiku, language: "Ukrainian").contains("notes in Ukrainian;") && !summarySystem(template: haiku).contains("LANGUAGE") && !summaryLanguages.contains("Russian"))
 assert(builtinTemplates.count == 10 && Set(builtinTemplates.map(\.id)).count == 10 && builtinTemplates[0].id == TemplateLibrary().defaultId)
 // old folder templates and old custom instructions become the user's own templates; a missing template falls back to the default
 let lib = migrateTemplates(["CAB": "One heading per change."], customPrompt: " Write haiku. ")
