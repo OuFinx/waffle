@@ -622,6 +622,15 @@ func speakingNames(_ texts: [String]) -> [String] {
     return out
 }
 
+/// Whether Teams has the user muted, from its mic button's label: "Unmute mic" while muted, "Mute mic" while not; nil when not shown.
+func teamsMuted(_ texts: [String]) -> Bool? {
+    for t in texts.map({ $0.lowercased() }) {
+        if t.hasPrefix("unmute mic") { return true }
+        if t.hasPrefix("mute mic") { return false }
+    }
+    return nil
+}
+
 /// The people the call window shows (video tiles, participant list): names of 2 to 4 capitalised words, in the order first seen.
 func rosterNames(_ texts: [String]) -> [String] {
     var out: [String] = []

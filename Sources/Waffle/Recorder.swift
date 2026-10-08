@@ -77,14 +77,14 @@ final class Recorder {
         // The speaker model downloads once from Hugging Face; until it is there, "Them" has no speaker labels. The AMI variant measured
         // best on a real meeting, also after an Opus 24 kbit/s round trip like a call (17.9% DER against 35-41% for the others).
         // ponytail: it tells apart at most 4 voices live; the pass after the call has no such limit.
-        Task.detached(priority: .utility) { [weak self] in
+        if Model.tellVoicesApart { Task.detached(priority: .utility) { [weak self] in
             do {
                 let d = try await LSEENDDiarizer(variant: .ami, stepSize: .step500ms)
                 await self?.sys.setDiarizer(d)
             } catch {
                 self?.error("Speaker labels are off: \(error.localizedDescription)")
             }
-        }
+        } }
 
         if await AVCaptureDevice.requestAccess(for: .audio) {
             guard !isStopped else { return }

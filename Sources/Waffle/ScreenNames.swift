@@ -43,7 +43,10 @@ final class ScreenNames {
     /// show their web content to accessibility go back to normal (it costs them CPU).
     func stop() {
         task?.cancel(); task = nil; onLook = { _ in }
-        for pid in opened { AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXManualAccessibility" as CFString, kCFBooleanFalse) }
+        for pid in opened {
+            AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXManualAccessibility" as CFString, kCFBooleanFalse)
+            AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXEnhancedUserInterface" as CFString, kCFBooleanFalse)
+        }
         opened = []
     }
 
@@ -58,7 +61,11 @@ final class ScreenNames {
         guard !pids.isEmpty || !meet.isEmpty else { return nil }
         var texts: [String] = [], framed: [String] = [], muted: Bool?
         if AXIsProcessTrusted() {
-            for pid in pids { texts += labels(pid) }
+            for pid in pids {
+                let l = labels(pid)
+                texts += l
+                if running.contains(where: { $0.processIdentifier == pid && $0.bundleIdentifier != "us.zoom.xos" }) { muted = teamsMuted(l) ?? muted }
+            }
             for a in running where a.bundleIdentifier == "us.zoom.xos" && pids.contains(a.processIdentifier) { muted = zoomMuted(a.processIdentifier) ?? muted }
         }
         // No one shown as talking in the labels (or no access to them): read the window, every 9 s at most. The app shows who talks
@@ -102,6 +109,8 @@ final class ScreenNames {
         if !opened.contains(pid) {  // Chromium-based apps build their web content's accessibility only when asked
             opened.insert(pid)
             AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            // The new Teams (WebView2) shows its web content, the mic button among it, only to what looks like a screen reader.
+            if NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.microsoft.teams2" { AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue) }
         }
         var windows: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows) == .success, let top = windows as? [AXUIElement] else { return [] }
@@ -121,11 +130,13 @@ final class ScreenNames {
     }
 
     /// Text recognised in a screenshot of the app's biggest normal window on screen (whose title passes `title`), and the names framed
-    /// as talking.
+    /// as talking. Teams' floating compact view goes first: while it shows, the main window is not drawn and its screenshot is stale.
     private func windowText(_ pid: pid_t, title: (String) -> Bool = { _ in true }) async -> (texts: [String], framed: [String]) {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true),
-              let w = content.windows.filter({ $0.owningApplication?.processID == pid && $0.windowLayer == 0 && $0.frame.width >= 300 && $0.frame.height >= 200 && title($0.title ?? "") })
-                .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true) else { return ([], []) }
+        let mine = content.windows.filter { $0.owningApplication?.processID == pid && $0.frame.width >= 200 && $0.frame.height >= 150 }
+        guard let w = mine.first(where: { ($0.title ?? "").hasPrefix("Meeting compact view") })
+                ?? mine.filter({ $0.windowLayer == 0 && $0.frame.width >= 300 && $0.frame.height >= 200 && title($0.title ?? "") })
+                    .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
         else { return ([], []) }
         let cfg = SCStreamConfiguration()
         let scale = min(2, max(1, 1800 / w.frame.width))  // big enough for name labels and the thin talking frame, small enough to read fast

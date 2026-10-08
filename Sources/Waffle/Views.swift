@@ -1472,14 +1472,19 @@ struct SettingsView: View {
 
 /// Settings: the pass after the call, Zoom's mute, and whether Waffle may hear the system audio.
 struct TranscriptSettings: View {
+    @State var voices = Model.tellVoicesApart
     @State var polish = Model.polishEnabled
     @State var followMute = Model.followCallMute
     @State var audio = SystemAudioPermission.status
 
     var body: some View {
         Section {
-            Toggle("Tell the voices apart again after the call", isOn: $polish).onChange(of: polish) { Model.polishEnabled = polish }
-            Toggle("Skip what I say while muted in Zoom", isOn: $followMute).onChange(of: followMute) { Model.followCallMute = followMute }
+            Toggle("Tell the other side's voices apart (experimental)", isOn: $voices).onChange(of: voices) { Model.tellVoicesApart = voices }
+                .help("Off: everyone on the call is \"Them\". On: Speaker 1, Speaker 2 or names from the call window, which can be wrong. From the next recording.")
+            if voices {
+                Toggle("Tell the voices apart again after the call", isOn: $polish).onChange(of: polish) { Model.polishEnabled = polish }
+            }
+            Toggle("Skip what I say while muted in Zoom or Teams", isOn: $followMute).onChange(of: followMute) { Model.followCallMute = followMute }
             HStack {
                 Text("System audio")
                 Spacer()

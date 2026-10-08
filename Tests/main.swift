@@ -105,6 +105,7 @@ assert(speakingNames(["Олег не говорить", "Oleg is not talking"]).
 assert(personName("Share Screen") == nil && personName("Oleg") == nil && personName("Oleg", minWords: 1) == "Oleg" && personName("room 42 B") == nil && personName("Leave") == nil)
 assert(speakingNames(["Talking: Oleg Petrenko", "Maryna Koval is speaking", "Ivan, speaking", "Anna Bell (speaking)", "Говорить: Олег", "Not speaking", "Mute"]) == ["Oleg Petrenko", "Maryna Koval", "Ivan", "Anna Bell", "Олег"], "\(speakingNames(["Talking: Oleg Petrenko", "Maryna Koval is speaking", "Ivan, speaking", "Anna Bell (speaking)", "Говорить: Олег", "Not speaking", "Mute"]))")
 assert(speakingNames(["You are speaking", "Speaking", "Oleg Petrenko"]).isEmpty)
+assert(teamsMuted(["Turn camera on", "Unmute mic", "Share"]) == true && teamsMuted(["Mute mic (⌘+Shift+M)"]) == false && teamsMuted(["Share"]) == nil)
 assert(rosterNames(["Weekly Sync | Microsoft Teams", "Sprint Planning", "Design Review", "Zoom Meeting - Oleg Petrenko"]).isEmpty)
 assert(rosterNames(["Oleg Petrenko (Host)", "Start Video", "Participants (3)", "Maryna Koval", "Oleg Petrenko", "Raise Hand"]) == ["Oleg Petrenko", "Maryna Koval"])
 let screenTurns = [Turn(start: 0, end: 10000, spk: "1-1"), Turn(start: 10000, end: 20000, spk: "1-2"), Turn(start: 20000, end: 30000, spk: "1-3")]

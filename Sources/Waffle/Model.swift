@@ -375,7 +375,7 @@ final class Model: ObservableObject {
         for p in look.people where p != selfName { seenPeople[p, default: 0] += 1 }
         // The call app shows the user as talking too. Their own name is left out; when it is not known, a name shown talking while the
         // microphone hears speech may be the user's, so that look is not used.
-        let shown = look.talking.filter { $0 != selfName }
+        let shown = Model.tellVoicesApart ? look.talking.filter { $0 != selfName } : []
         guard !shown.isEmpty, selfName != nil || !hearing.contains("mic") else {
             if !shown.isEmpty { log.info("look not used: own name unknown while the microphone hears speech") }
             return
@@ -387,10 +387,17 @@ final class Model: ObservableObject {
         updateNames(id)
     }
 
-    /// Settings: what the user says while muted in Zoom is not transcribed. On unless turned off.
+    /// Settings: what the user says while muted in Zoom or Teams is not transcribed. On unless turned off.
     static var followCallMute: Bool {
         get { UserDefaults.standard.object(forKey: "followCallMute") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "followCallMute") }
+    }
+
+    /// Settings: the other side's voices told apart (diarization) and named from the call window. Off unless turned on: it is often
+    /// wrong, and off every "Them" line is just "Them".
+    static var tellVoicesApart: Bool {
+        get { UserDefaults.standard.bool(forKey: "tellVoicesApart") }
+        set { UserDefaults.standard.set(newValue, forKey: "tellVoicesApart") }
     }
 
     /// Settings: after the call, the other side's voices are told apart again over the whole call, before the notes are written. On
@@ -461,7 +468,7 @@ final class Model: ObservableObject {
             Store.saveLines(id, lines)
             saveScreenNames(id)
             Store.updateMeta(id, ["recording": false])
-            guard Model.polishEnabled, tapes.sys.seconds >= 3, !tapes.sys.full else { return wrapUp(id) }
+            guard Model.tellVoicesApart, Model.polishEnabled, tapes.sys.seconds >= 3, !tapes.sys.full else { return wrapUp(id) }
             detail = "telling the voices apart"
             polish(id, tapes)
         }
