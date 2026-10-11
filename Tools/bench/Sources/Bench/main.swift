@@ -1,6 +1,6 @@
 // A meeting recording (16 kHz wav) as the "Them" stream through the app's own code: Logic.swift and Engine.swift are the app's files
 // (symlinks); what Recorder.swift's Source and Model.polish do around them is re-created here with the same constants. Change this file
-// along with Source or polish. `Bench <wav> <out.json>` writes the lines with their live and after-the-call voices; `Bench <wav> <out.json>
+// along with Source, refine or polish. `Bench <wav> <out.json>` writes the lines with their live and after-the-call voices; `Bench <wav> <out.json>
 // whole` recognizes the whole file at once instead (the model's own level, for comparison).
 import FluidAudio
 import Foundation
@@ -84,7 +84,15 @@ try await run(w.flush())
 emit(try await Engine.shared.exclusive { () throws -> [Nemotron3ChunkResult] in diarizer.appendAudio(diarPending); return try diarizer.finishStream() })
 let liveTime = Date().timeIntervalSince(started)
 lines = lines.map { var l = $0; l.final = true; return l }
-let live = labelSpeakers(lines, turns)  // Model.labelled, no call window
+var live = labelSpeakers(lines, turns)  // Model.labelled, no call window
+
+// Model.refine: the tape recognized twice more, the words both passes agree on go in
+let t3 = Date(), shift = 5.5
+let ta = try await Engine.shared.transcribe(tape.floats), tb = try await Engine.shared.transcribe(quiet(Int(shift * 16000)) + tape.floats)
+let refined = refineText(live, a: tapeWords(ta, tape.clock), b: tapeWords(tb, tape.clock, from: shift))
+let refineTime = Date().timeIntervalSince(t3)
+let liveText = live.map(\.text).joined(separator: " ")
+live = refined
 
 // Model.polish, no calendar and no call window
 let t2 = Date()
@@ -101,5 +109,6 @@ let polishTime = Date().timeIntervalSince(t2)
 
 try write(["audio": Double(audio.count) / 16000, "liveTime": liveTime, "asrTime": asrTime, "vadTime": vadTime, "diarTime": diarTime, "passes": passes, "thinRetries": thinRetries,
            "tape": tape.seconds, "liveVoices": Set(live.compactMap(\.spk)).count, "offVoices": Set(offTurns.map(\.spk)).count, "polishUsed": use, "polishTime": polishTime,
+           "refineTime": refineTime, "liveText": liveText,
            "lines": zip(live, polished).map { a, b in ["t": (Double(a.t) - base) / 1000, "text": a.text, "live": a.spk ?? "", "polish": b.spk ?? ""] as [String: Any] }])
 print(String(format: "done in %.0f s", liveTime))
