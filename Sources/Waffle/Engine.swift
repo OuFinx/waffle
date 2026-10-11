@@ -170,16 +170,18 @@ final class Engine: @unchecked Sendable {
         }
     }
 
-    /// Who speaks when in a whole recording (the pass after a call): turns in seconds from its start, voices "o1", "o2"...
-    func diarize(_ samples: [Float], maxSpeakers: Int?) async throws -> [(start: Double, end: Double, spk: String)] {
+    /// Who speaks when in a whole recording (the pass after a call): turns in seconds from its start, voices "o1", "o2"..., and each
+    /// voice's print (the speaker model's average embedding of it, which comes with the turns at no extra cost).
+    func diarize(_ samples: [Float], maxSpeakers: Int?) async throws -> (turns: [(start: Double, end: Double, spk: String)], prints: [String: [Float]]) {
         let d = OfflineDiarizerManager(config: OfflineDiarizerConfig.default.withSpeakers(max: maxSpeakers))
         try await d.prepareModels()
         let r = try await exclusive { try await d.process(audio: samples) }
         var ids: [String: String] = [:]
-        return r.segments.sorted { $0.startTimeSeconds < $1.startTimeSeconds }.map { s in
+        let turns = r.segments.sorted { $0.startTimeSeconds < $1.startTimeSeconds }.map { s in
             if ids[s.speakerId] == nil { ids[s.speakerId] = "o\(ids.count + 1)" }
-            return (Double(s.startTimeSeconds), Double(s.endTimeSeconds), ids[s.speakerId]!)
+            return (start: Double(s.startTimeSeconds), end: Double(s.endTimeSeconds), spk: ids[s.speakerId]!)
         }
+        return (turns, Dictionary(uniqueKeysWithValues: (r.speakerDatabase ?? [:]).compactMap { k, v in ids[k].map { ($0, v) } }))
     }
 }
 

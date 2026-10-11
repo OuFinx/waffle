@@ -11,6 +11,13 @@ let base = 1_700_000_000_000.0
 func ms(_ s: Int) -> Double { base + Double(s) / 16 }
 func write(_ info: [String: Any]) throws { try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted]).write(to: URL(fileURLWithPath: out)) }
 
+// `Bench <wav> <out.json> voices`: only the pass after the call, over the whole file, with each voice's print (for voices.py).
+if CommandLine.arguments.dropFirst(3).first == "voices" {
+    let r = try await Engine.shared.diarize(audio, maxSpeakers: nil)
+    try write(["turns": r.turns.map { [$0.start, $0.end, $0.spk] as [Any] }, "prints": r.prints])
+    exit(0)
+}
+
 _ = try await AsrModels.download(version: Engine.asrVersion)
 _ = try await VadManager(config: .default)
 Engine.shared.retain()
@@ -81,7 +88,7 @@ let live = labelSpeakers(lines, turns)  // Model.labelled, no call window
 
 // Model.polish, no calendar and no call window
 let t2 = Date()
-let segs = try await Engine.shared.diarize(tape.floats, maxSpeakers: nil)
+let segs = try await Engine.shared.diarize(tape.floats, maxSpeakers: nil).turns
 let offTurns = segs.map { Turn(start: Int(tape.clock.ms(Int($0.start * 16000))), end: Int(tape.clock.ms(Int($0.end * 16000))), spk: $0.spk) }
 let use = !offTurns.isEmpty && live.contains { $0.spk == nil }
 var polished = live

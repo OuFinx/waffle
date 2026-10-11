@@ -72,7 +72,7 @@ Then join a call: Waffle notices the call app taking the microphone (Zoom, Teams
 - **Stops by itself** when the call app releases the microphone or after a long silence.
 
 **After the call**
-- **Voices sorted out**: Waffle tells the other side's voices apart once more over the whole call, without the live limit of 4 (about 10 seconds for an hour; Settings > Transcript).
+- **Voices sorted out**: Waffle tells the other side's voices apart once more over the whole call, without the live limit of 4 (about 10 seconds for an hour; Settings > Transcript). Optionally a voice you named once gets that name in later meetings; when it is not sure, it leaves the voice unnamed.
 - **Summary**: topics, decisions, owners, dates and next steps, built around your own notes if you wrote any. 10 built-in templates (Standup, One-on-one, Incident review, Customer call and more) plus your own.
 - **Ask anything** about one meeting, a folder, or all meetings. Answers link back to the meetings they came from.
 - **Copy for Slack or email**: rich text with bold and nested bullets intact.
@@ -89,7 +89,7 @@ Then join a call: Waffle notices the call app taking the microphone (Zoom, Teams
 | What | Where it goes |
 |---|---|
 | Audio | Recognised in memory on your Mac by [Parakeet](https://huggingface.co/moondream/parakeet-ultra) via [FluidAudio](https://github.com/FluidInference/FluidAudio). The other side's speech is kept in memory until its voices are told apart after the call, then discarded. Never written to disk. |
-| Voices | Told apart on your Mac by [LS-EEND](https://huggingface.co/FluidInference/lseend-coreml) live and [pyannote](https://huggingface.co/pyannote/speaker-diarization-community-1) after the call, via FluidAudio. |
+| Voices | Told apart on your Mac by [LS-EEND](https://huggingface.co/FluidInference/lseend-coreml) live and [pyannote](https://huggingface.co/pyannote/speaker-diarization-community-1) after the call, via FluidAudio. With Settings > Transcript > Remember the voices I name (off by default), a voice print (numbers, never audio) of each voice that spoke 20 s or more stays in the meeting's `meta.json`, and the ones you name in `voices.json`, both on your Mac; Forget Voices deletes them all. |
 | Calendar | The title and the names of the people invited to the event of a call, kept with that meeting, if you allow the calendar. |
 | Transcripts, notes, summaries | Plain files in `~/Library/Application Support/Waffle`. |
 | Transcript text | Sent to your AI (Claude Code or Codex, with your own sign-in) only when a summary or report is made or you ask a question. |

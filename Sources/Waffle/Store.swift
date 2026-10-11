@@ -236,6 +236,38 @@ enum Store {
         updateMeta(id, ["speakers": s])
     }
 
+    // MARK: known voices (Settings, off unless turned on): prints only, never audio. A meeting's meta keeps the prints of its voices
+    // that spoke long enough ("prints": {"1-2": [...]}), so a name given later teaches that voice; <data>/voices.json keeps the named ones.
+
+    private static var voicesURL: URL { dataDir.appendingPathComponent("voices.json") }
+    /// The voices the user named: {"Oleg": {"print": [...], "n": 3}}.
+    static var voices: [String: (print: [Float], n: Int)] {
+        (json(voicesURL) as? [String: [String: Any]] ?? [:]).compactMapValues { v in
+            (v["print"] as? [Double]).map { (print: $0.map(Float.init), n: v["n"] as? Int ?? 1) }
+        }
+    }
+    static func prints(_ id: String) -> [String: [Float]] { (meta(id)["prints"] as? [String: [Double]] ?? [:]).mapValues { $0.map(Float.init) } }
+    /// The user named a voice of a meeting: its print joins that person's.
+    static func learnVoice(_ id: String, _ spk: String, _ name: String) {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        guard !n.isEmpty, let p = prints(id)[spk] else { return }
+        lock.lock(); defer { lock.unlock() }
+        var all = json(voicesURL)
+        let v = addPrint(voices[n], p)
+        all[n] = ["print": v.print, "n": v.n]
+        writeJSON(all, voicesURL)
+    }
+    /// Settings, Forget Voices: the named voices and every meeting's prints go.
+    static func forgetVoices() {
+        try? fm.removeItem(at: voicesURL)
+        for id in ids() where meta(id)["prints"] != nil {
+            lock.lock()
+            var m = meta(id); m["prints"] = nil
+            writeJSON(m, dir(id).appendingPathComponent("meta.json"))
+            lock.unlock()
+        }
+    }
+
     /// The people the call window (Zoom, Teams) showed during the meeting, see ScreenNames.
     static func people(_ id: String) -> [String] { meta(id)["people"] as? [String] ?? [] }
 

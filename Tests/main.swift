@@ -430,4 +430,13 @@ let lumped = [spoke(1000, "2-1"), spoke(3000, "2-1"), spoke(5000, "2-1"), spoke(
 assert(carryVoices(live: lumped, turns: [Turn(start: 0, end: 10000, spk: "a"), Turn(start: 20000, end: 30000, spk: "b")]) == ["a": "2-1"])
 assert(oneOnOne(invited: ["Oleg Petrenko"], voices: ["2-1"]) == ["2-1": "Oleg Petrenko"] && oneOnOne(invited: ["A", "B"], voices: ["2-1"]).isEmpty)
 
+// known voices: a clear match gets the name; a weak one, one between two people, or a second voice for a taken name gets none
+let known: [String: [Float]] = ["Oleg": [1, 0, 0], "Anna": [0, 1, 0]]
+assert(knownVoices(["2-1": [0.9, 0.1, 0.2], "2-2": [0.1, 0.95, 0], "2-3": [0, 0, 1]], known) == ["2-1": "Oleg", "2-2": "Anna"])
+assert(knownVoices(["2-1": [0.8, 0.65, 0]], known).isEmpty)  // close to Oleg, but not clearly more than to Anna
+assert(knownVoices(["2-1": [1, 0, 0.05], "2-2": [0.9, 0, 0.3]], known) == ["2-1": "Oleg"])  // the closer voice only
+assert(knownVoices(["2-1": [1, 0, 0]], [:]).isEmpty && knownVoices(["2-1": [0.5, 0, 0.9]], ["Oleg": [1, 0, 0]]).isEmpty)
+let twice = addPrint(addPrint(nil, [2, 0]), [0, 1])
+assert(twice.n == 2 && abs(twice.print[0] - twice.print[1]) < 0.001 && abs(twice.print[0] * twice.print[0] + twice.print[1] * twice.print[1] - 1) < 0.001)
+
 print("ok")

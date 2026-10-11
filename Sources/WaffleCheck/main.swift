@@ -174,7 +174,7 @@ for (a, b, text) in pairs where have.contains(a) && have.contains(b) {
         i0 += 4096
     }
     let t1 = Date()
-    let offline = try await Engine.shared.diarize(tape.floats, maxSpeakers: nil).map { (start: tape.clock.ms(Int($0.start * 16000)) / 1000, end: tape.clock.ms(Int($0.end * 16000)) / 1000, spk: $0.spk) }
+    let offline = try await Engine.shared.diarize(tape.floats, maxSpeakers: nil).turns.map { (start: tape.clock.ms(Int($0.start * 16000)) / 1000, end: tape.clock.ms(Int($0.end * 16000)) / 1000, spk: $0.spk) }
     let p1 = purity(offline, d.who)
     print(String(format: "speakers after the call (%@/%@): %d found, %.0f%% of speech right, tape %.0f of %.0f s, %.1f s", a, b, Set(offline.map(\.spk)).count, p1 * 100, tape.seconds, Double(d.audio.count) / 16000, Date().timeIntervalSince(t1)))
     check(tape.seconds >= Double(d.who.map { $0.to - $0.from }.reduce(0, +)) / 16000 * 0.95, "\(a)/\(b): the tape keeps the speech")
