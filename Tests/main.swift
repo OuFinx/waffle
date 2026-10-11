@@ -356,6 +356,17 @@ assert(!echoLike(voice, ref, maxLag: 4800) && !echoLike([Float](repeating: 0, co
 assert(echoLike(Array(ref[(4800 - 960)..<(4800 - 960 + 4096)]).map { $0 * 0.02 }, ref.map { $0 * 0.1 }, maxLag: 4800))  // faint echo of quiet sound
 assert(!echoLike(voice.map { $0 * 0.5 }, ref.map { $0 * 0.01 }, maxLag: 4800))  // the user loud over faint system audio
 
+// a whole line is echo when the mic's loudness follows the system audio's; the user's own voice (even repeating their words) is not
+func talk(_ pattern: [Int]) -> [Float] { pattern.flatMap { on in noise(1600).map { $0 * (on == 1 ? 1 : 0.01) } } }  // 100 ms steps
+let theirs = talk((0..<40).map { $0 % 5 < 3 ? 1 : 0 }), own = talk((0..<40).map { $0 % 7 < 2 ? 1 : 0 })
+func loudness(_ x: [Float], from ms: Double) -> Loudness { var l = Loudness(); for k in stride(from: 0, to: x.count - 4095, by: 4096) { l.add(Array(x[k..<k + 4096]), ms: ms + Double(k) / 16) }; return l }
+let them = loudness(theirs, from: 1000)
+assert(followsLoudness(mic: loudness([Float](repeating: 0, count: 1600) + theirs.map { $0 * 0.1 }, from: 1000), sys: them, from: 1500, to: 3500))  // 100 ms later
+assert(!followsLoudness(mic: loudness(own, from: 1000), sys: them, from: 1500, to: 3500))
+assert(!followsLoudness(mic: loudness(own, from: 1000), sys: loudness([Float](repeating: 0, count: theirs.count), from: 1000), from: 1500, to: 3500))  // they were silent
+let repeated = [line(0, "sys", "We ship the release on Monday at nine and then the freeze starts."), line(2000, "mic", "Monday at nine and then the freeze.")]
+assert(dropEcho(repeated).count == 1 && dropEcho(repeated, heard: { _, _ in false }).count == 2)  // only when the audio says echo too
+
 // quiet audio is brought up for the recognizer, loud audio down, without clipping; a quiet person after a loud one is brought up too,
 // and the quiet between words stays quiet
 func tone(_ n: Int, _ a: Float) -> [Float] { (0..<n).map { Float(sin(Double($0) / 10)) * a } }
