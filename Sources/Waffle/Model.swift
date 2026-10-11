@@ -345,7 +345,7 @@ final class Model: ObservableObject {
     private func addWindow(_ id: String, _ src: String, _ w: Int, _ final: Bool, _ segs: [Segment]) {
         guard activeId == id else { return }
         if !segs.isEmpty { lastSpeech = Date() }
-        lines = labelled(replaceWindow(lines, src: src, w: w, part: part, final: final, segments: segs))
+        lines = labelled(replaceWindow(lines, src: src, w: w, part: part, final: final, segments: segs, heard: { recorder?.echoed($0, $1) ?? false }))
         if final { Store.saveLinesSoon(id, lines) }
     }
 

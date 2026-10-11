@@ -23,5 +23,12 @@ let package = Package(
             path: "Sources/WaffleCheck",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        // The echo bench (`swift run -c release WaffleBench <set dir> <cache dir>`, see Tools/echo/main.swift); shares Logic.swift and Engine.swift.
+        .executableTarget(
+            name: "WaffleBench",
+            dependencies: [.product(name: "FluidAudio", package: "FluidAudio")],
+            path: "Tools/echo",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )

@@ -152,25 +152,25 @@ func isEcho(_ mine: [String], at t: Int, them: [String], at s: Int) -> Bool {
     return Double(commonRun(mine, them)) >= 0.7 * Double(mine.count)
 }
 
-/// On speakers the mic also hears the other side: drop "Me" lines that are an echo of a "Them" line (see isEcho).
-func dropEcho(_ lines: [Line]) -> [Line] {
+/// On speakers the mic also hears the other side: drop "Me" lines that are an echo of a "Them" line (see isEcho) when the audio of the line (`heard`, from its start to about 0.4 s a word later, epoch ms) also sounds like echo. Text alone deleted the user's own sentence when they repeated what the other side said.
+func dropEcho(_ lines: [Line], heard: (Int, Int) -> Bool = { _, _ in true }) -> [Line] {
     let them = lines.filter { $0.src == "sys" }.map { ($0.t, words($0.text)) }
     return lines.filter { l in
         guard l.src == "mic" else { return true }
         let mine = words(l.text)
-        return !them.contains { isEcho(mine, at: l.t, them: $0.1, at: $0.0) }
+        return !them.contains { isEcho(mine, at: l.t, them: $0.1, at: $0.0) } || !heard(l.t, l.t + max(1, mine.count) * 400)
     }
 }
 
 /// A new recognition pass over one speaker's window: its lines replace the ones from the previous pass of the same window.
-func replaceWindow(_ lines: [Line], src: String, w: Int, part: Int, final: Bool, segments: [Segment], echoMs: Int = 30000) -> [Line] {
+func replaceWindow(_ lines: [Line], src: String, w: Int, part: Int, final: Bool, segments: [Segment], echoMs: Int = 30000, heard: (Int, Int) -> Bool = { _, _ in true }) -> [Line] {
     let fresh = splitSentences(segments).map { Line(t: w + $0.0, src: src, text: $0.1, part: part, final: final, w: w) }
     let all = (lines.filter { !($0.w == w && $0.src == src) } + fresh).sorted { $0.t < $1.t }
     // Every pass so far left the transcript free of echoes, so only lines near the new ones can be echoes now (an echo sits within a
     // long sentence of its "Them" line). The rest of a long meeting is not looked at again.
     guard let from = fresh.map(\.t).min() else { return all }
     let cut = firstIndex(all.count) { all[$0].t >= from - 2 * echoMs }
-    return Array(all[..<cut]) + dropEcho(Array(all[cut...]))
+    return Array(all[..<cut]) + dropEcho(Array(all[cut...]), heard: heard)
 }
 
 /// One sentence of a recognition pass: its text, the index after its last token, when it starts and ends, and when the next token starts.
@@ -1315,6 +1315,36 @@ struct RateCheck {
     }
 
     private mutating func begin(_ t: Double, _ n: Int) { start = t; last = t; frames = n; gaps = 0; longest = 0 }
+}
+
+/// A stream's loudness per 8 ms (128 samples, so a 256 ms piece is 32 of them) on the wall clock, for the whole call (1.8 MB an hour). Audio that did not come (a muted mic, nothing playing) counts as silence.
+struct Loudness {
+    private(set) var start = 0.0  // epoch ms of the first frame
+    private(set) var frames: [Float] = []
+
+    mutating func add(_ x: [Float], ms: Double) {
+        if frames.isEmpty { start = ms }
+        let at = max(0, Int(((ms - start) / 8).rounded()))
+        if at > frames.count { frames += [Float](repeating: 0, count: at - frames.count) } else { frames.removeLast(frames.count - at) }
+        frames += stride(from: 0, to: x.count - 127, by: 128).map { k in (x[k..<k + 128].reduce(0) { $0 + $1 * $1 } / 128).squareRoot() }
+    }
+}
+
+/// Whether the mic's loudness over a stretch (epoch ms) rises and falls with the system audio's 0-300 ms before: the speakers coming back. The user's own voice does not follow it, also when it repeats the other side's words, so a "Me" line that reads like a "Them" line is only dropped as echo when this agrees (see dropEcho). On the echo bench (Tools/bench) that kept every repeat the text alone deleted (23 of 84 repeat lines) and lost 44% fewer of the user's words, for 11% more echo words left in "Me" (at 0.3 it lost more of the user's words, at 0.5 it left more echo).
+func followsLoudness(mic: Loudness, sys: Loudness, from: Int, to: Int) -> Bool {
+    let a = max(0, Int((Double(from) - mic.start) / 8)), b = min(mic.frames.count, Int((Double(to) - mic.start) / 8))
+    guard b - a >= 12 else { return false }
+    let shift = Int(((mic.start - sys.start) / 8).rounded()), m = mic.frames[a..<b]
+    func corr(_ s: ArraySlice<Float>) -> Float {
+        let n = Float(m.count), mm = m.reduce(0, +) / n, ms = s.reduce(0, +) / n
+        var sab: Float = 0, saa: Float = 0, sbb: Float = 0
+        for (x, y) in zip(m, s) { sab += (x - mm) * (y - ms); saa += (x - mm) * (x - mm); sbb += (y - ms) * (y - ms) }
+        return saa > 0 && sbb > 0 ? sab / (saa * sbb).squareRoot() : 0
+    }
+    return (0...38).contains { lag in
+        let lo = a + shift - lag, hi = b + shift - lag
+        return lo >= 0 && hi <= sys.frames.count && corr(sys.frames[lo..<hi]) >= 0.4
+    }
 }
 
 // MARK: after a call: the other side's voices told apart again over the whole call

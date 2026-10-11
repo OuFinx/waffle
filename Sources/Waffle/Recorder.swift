@@ -40,6 +40,7 @@ final class Recorder {
         set { flags.withLock { $0.micOn = newValue } }
     }
     private let flags = Locked(Flags())
+    private let loudness = Locked((mic: Loudness(), sys: Loudness()))  // both streams as they came, for the echo check of whole lines
     private struct Flags { var micOn = true; var stopped = false; var sysHeard = false; var lastMic = 0.0, lastSys = 0.0 }  // last*: epoch ms where the audio captured so far ends
 
     private var mic: Source!, sys: Source!
@@ -292,6 +293,10 @@ final class Recorder {
     /// The system audio around a wall time, for the echo check (nil if not there yet).
     func reference(endMs: Double, count: Int) async -> [Float]? { await sys.recent(endMs: endMs, count: count) }
 
+    /// Whether a stretch of the mic (epoch ms) sounds like the speakers coming back, so a "Me" line that reads like a "Them" line may go.
+    func echoed(_ from: Int, _ to: Int) -> Bool { speakersInUse && loudness.withLock { followsLoudness(mic: $0.mic, sys: $0.sys, from: from, to: to) } }
+    fileprivate func loud(_ src: String, _ x: [Float], _ ms: Double) { loudness.withLock { src == "mic" ? $0.mic.add(x, ms: ms) : $0.sys.add(x, ms: ms) } }
+
     fileprivate func window(_ src: String, _ w: Int, _ final: Bool, _ segs: [Segment]) { DispatchQueue.main.async { self.onWindow(src, w, final, segs) } }
     fileprivate func hearing(_ src: String, _ on: Bool) { DispatchQueue.main.async { self.onHearing(src, on) } }
     fileprivate func turns(_ t: [Turn]) { DispatchQueue.main.async { self.onTurns(t) } }
@@ -397,6 +402,7 @@ actor Source {
     private func process(_ input: [Float]) async {
         let ms = clock.ms(fed)
         var x = input
+        rec.loud(name, input, ms)
         if name == "mic", rec.speakersInUse, let ref = await rec.reference(endMs: ms + 256, count: chunk + 4800), echoLike(x, ref, maxLag: 4800) {
             x = quiet(chunk)  // the speakers coming back into the mic, past echo cancellation
         }
