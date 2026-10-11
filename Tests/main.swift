@@ -375,6 +375,41 @@ assert(callAppName(bundle: "com.apple.avconferenced", path: "/usr/libexec/avconf
 assert(callAppName(bundle: "com.apple.corespeechd", path: "", name: nil) == nil && callAppName(bundle: "com.superduper.superwhisper", path: "/Applications/superwhisper.app/Contents/MacOS/superwhisper", name: "superwhisper") == nil)
 assert(callAppName(bundle: "us.zoom.xos", path: "/Applications/zoom.us.app/Contents/MacOS/zoom.us", name: "zoom.us") == "zoom.us")
 
+// a microphone muted at the hardware sends exact zeros; a quiet room is never exact zeros
+assert(mostlyZeros([Float](repeating: 0, count: 4096)) && mostlyZeros([Float](repeating: 0, count: 4090) + [0.01, 0, 0, 0, 0, -0.01]))
+assert(!mostlyZeros((0..<4096).map { _ in Float.random(in: -0.0001...0.0001) }) && !mostlyZeros([Float](repeating: 0, count: 2048) + tone(2048, 0.001)))
+
+// the microphone watchdog: silence and a muted mic are never restarted (the muted one is told once); a mic sending nothing is restarted
+// with growing waits, then given up once instead of forever; one that works for 30 s starts the count afresh
+var watch = MicWatch(), calls: [(Double, MicWatch.Call)] = []
+for i in 0..<240 { let now = Double(i) / 2; calls.append((now, watch.check(now: now, sinceAudio: 0.1, sinceSound: min(now, 2)))) }  // quiet room
+assert(calls.allSatisfy { $0.1 == .wait })
+calls = []
+for i in 0..<240 { let now = Double(i) / 2; calls.append((now, watch.check(now: now, sinceAudio: 0.1, sinceSound: now))) }  // exact zeros for 2 minutes
+assert(calls.filter { $0.1 != .wait }.map(\.1) == [.muted] && calls.first { $0.1 == .muted }!.0 == 10)
+watch = MicWatch(); calls = []
+for i in 0..<400 { let now = Double(i) / 2; calls.append((now, watch.check(now: now, sinceAudio: 3.5, sinceSound: 3.5))) }  // nothing comes
+let acted = calls.filter { $0.1 != .wait }
+assert(acted.map(\.1) == [.restart, .restart, .restart, .restart, .giveUp] && acted.map(\.0) == [0, 1, 3, 7, 15], "\(acted)")
+for i in 0..<61 { _ = watch.check(now: 200 + Double(i) / 2, sinceAudio: 0.1, sinceSound: 0.1) }  // it came back for 30 s
+assert(watch.tries == 0 && watch.check(now: 231, sinceAudio: 3.5, sinceSound: 3.5) == .restart)
+
+// the system audio's delivered rate: steady 48 kHz is fine, a device that switches to 44.1 kHz in place is noticed within 2 s (not on
+// the window over the switch), and buffers dropped now and then or a gap in the stream are not a rate change
+func delivered(_ parts: [(rate: Double, secs: Double)], drop: (Int) -> Bool = { _ in false }) -> [Double] {
+    var check = RateCheck(rate: 48000), t = 0.0, i = 0, out: [Double] = []
+    for p in parts {
+        let end = t + p.secs
+        while t < end { if !drop(i), check.add(512, at: t) { out.append(t) }; t += 512 / p.rate; i += 1 }
+    }
+    return out
+}
+assert(delivered([(48000, 60)]).isEmpty && delivered([(48000, 60)], drop: { $0 % 10 == 0 }).isEmpty && delivered([(48000, 30)], drop: { $0 % 500 < 300 }).isEmpty)
+let switched = delivered([(48000, 10), (44100, 10)])
+assert(!switched.isEmpty && switched[0] > 10.9 && switched[0] < 12, "\(switched)")
+let halved = delivered([(48000, 10), (24000, 3)])
+assert(halved.count == 2 && halved[0] > 10.9 && halved[0] < 12, "\(halved)")  // again a second later only if nothing rebuilt it
+
 // after the call: the voices told apart again carry the live voices' names
 func spoke(_ t: Int, _ spk: String) -> Line { var l = line(t, "sys", "Something said here."); l.spk = spk; return l }
 let liveVoices = [spoke(1000, "2-1"), spoke(3000, "2-1"), spoke(5000, "@Oleg"), spoke(21000, "2-2"), spoke(23000, "2-2"), spoke(40000, "2-3")]

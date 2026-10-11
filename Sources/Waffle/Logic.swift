@@ -1252,6 +1252,71 @@ func echoLike(_ mic: [Float], _ ref: [Float], maxLag: Int, step: Int = 32) -> Bo
     return best >= 0.75
 }
 
+// MARK: capture health (Recorder's watchdog)
+
+/// Almost all exact zeros (99%): what a microphone muted at the hardware or by macOS sends. A working one always hears some room noise.
+func mostlyZeros<C: Collection>(_ x: C) -> Bool where C.Element == Float {
+    var zeros = 0
+    for v in x where v == 0 { zeros += 1 }
+    return zeros * 100 >= x.count * 99
+}
+
+/// The watchdog's call on the microphone, twice a second, from the seconds since it last sent audio and since it last sent sound (audio
+/// that is not mostly zeros). Only exact zeros: muted at the hardware or by macOS, not broken, so it is told once and never restarted.
+/// No audio at all for 3 s: the route broke, restart it, waiting 1, 2, 4, 8 s between tries, then give up until the devices change. A
+/// microphone that delivered for 30 s starts the count afresh.
+struct MicWatch {
+    enum Call: Equatable { case wait, restart, giveUp, muted }
+    private(set) var tries = 0
+    private var next = 0.0, fineSince: Double?, toldMuted = false
+
+    mutating func check(now: Double, sinceAudio: Double, sinceSound: Double) -> Call {
+        if sinceAudio > 3 {
+            fineSince = nil
+            guard now >= next, tries <= 4 else { return .wait }
+            tries += 1
+            if tries > 4 { return .giveUp }
+            next = now + pow(2, Double(tries - 1))
+            return .restart
+        }
+        if now - (fineSince ?? now) >= 30 { tries = 0 }
+        if fineSince == nil { fineSince = now }
+        if sinceSound < 10 { toldMuted = false; return .wait }
+        if toldMuted { return .wait }
+        toldMuted = true
+        return .muted
+    }
+}
+
+/// Whether a capture delivers frames at the rate its format says, measured against the buffers' own host times. A device that changes
+/// its rate in place (48 to 44.1 kHz, a headset to 24 kHz) keeps sending, only at another rate, and nothing else tells: its audio then
+/// comes out too fast or too slow. A window of 0.5 s counts only when the buffers came evenly (a dropped buffer leaves one gap much
+/// longer than the rest), and two windows in a row more than 4% off are needed (the window over the switch measures something between).
+struct RateCheck {
+    let rate: Double
+    private var start: Double?, last = 0.0, frames = 0, gaps = 0, longest = 0.0, offBefore = false
+
+    init(rate: Double) { self.rate = rate }
+
+    /// One buffer: its frames and the host time (s) of its first frame. True when the rate is off: the capture should be built again.
+    mutating func add(_ n: Int, at t: Double) -> Bool {
+        guard let s = start, t > last, t - s <= 2 else {  // the first buffer, a clock that went back or a gap: start over
+            begin(t, n); offBefore = false
+            return false
+        }
+        longest = max(longest, t - last); gaps += 1; last = t
+        guard t - s >= 0.5 else { frames += n; return false }
+        let even = longest <= (t - s) / Double(gaps) * 1.5
+        let off = even && abs(Double(frames) / (t - s) - rate) > rate * 0.04  // frames before this buffer, over the time they took
+        let confirmed = off && offBefore
+        offBefore = off && !confirmed
+        begin(t, n)
+        return confirmed
+    }
+
+    private mutating func begin(_ t: Double, _ n: Int) { start = t; last = t; frames = n; gaps = 0; longest = 0 }
+}
+
 // MARK: after a call: the other side's voices told apart again over the whole call
 
 /// Which live voice each voice told apart after the call is: the one most of its live lines had. Live lines the call window named count too
