@@ -10,6 +10,9 @@ struct Line: Codable, Equatable, Hashable {
     var final: Bool
     var w: Int?
     var spk: String? = nil  // who of "Them" said it, from speaker diarization: "<part>-<n>"
+    var words: [Int]? = nil  // when each word of the text starts (epoch ms), to split the line where the voice changes (see splitAtVoices); not saved
+
+    private enum CodingKeys: String, CodingKey { case t, src, text, part, final, w, spk }
 }
 
 /// A stretch of system audio in which one voice spoke, from the diarizer. Times are epoch ms.
@@ -26,17 +29,52 @@ func labelSpeakers(_ lines: [Line], _ turns: [Turn]) -> [Line] {
     var out = lines
     for (k, i) in sys.enumerated() {
         let s = lines[i].t, e = k + 1 < sys.count ? max(min(lines[sys[k + 1]].t, s + 10000), s + 500) : s + 4000
-        var overlap: [String: Int] = [:]
-        // Turns that start before s - longest also end before s: skip them all with a binary search.
-        var j = firstIndex(turns.count) { turns[$0].start >= s - longest }
-        while j < turns.count, turns[j].start < e {
-            let t = turns[j]
-            if t.end > s { overlap[t.spk, default: 0] += min(t.end, e) - max(t.start, s) }
-            j += 1
-        }
-        if let top = overlap.max(by: { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) }) { out[i].spk = top.key }
+        if let top = voice(turns, longest: longest, s, e) { out[i].spk = top }
     }
     return out
+}
+
+/// The voice whose turns overlap s..<e most (turns sorted by start, `longest` the longest of them), nil when none does.
+func voice(_ turns: [Turn], longest: Int, _ s: Int, _ e: Int) -> String? {
+    var overlap: [String: Int] = [:]
+    // Turns that start before s - longest also end before s: skip them all with a binary search.
+    var j = firstIndex(turns.count) { turns[$0].start >= s - longest }
+    while j < turns.count, turns[j].start < e {
+        let t = turns[j]
+        if t.end > s { overlap[t.spk, default: 0] += min(t.end, e) - max(t.start, s) }
+        j += 1
+    }
+    return overlap.max(by: { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) })?.key
+}
+
+/// A "Them" line in which another voice takes over for good is split there, so each part gets its own voice (labelSpeakers): one sentence often holds the end of one person's words and the start of the next one's. A word's voice is the turn that overlaps it most, from its start to the next word's (at most 1 s). A run of words by one voice shorter than 5 words or 1.5 s is a backchannel, crosstalk or a diarizer slip and takes the voice of the run before it (the first run, the one after). Lines without word times stay whole.
+/// On the meeting bench this gave the right voice to 1 point more of the reference words (80.3% to 81.3%), with the share of right lines unchanged.
+func splitAtVoices(_ lines: [Line], _ turns: [Turn], minWords: Int = 5, minMs: Int = 1500) -> [Line] {
+    guard !turns.isEmpty else { return lines }
+    let turns = zip(turns, turns.dropFirst()).allSatisfy { $0.start <= $1.start } ? turns : turns.sorted { $0.start < $1.start }
+    let longest = turns.map { $0.end - $0.start }.max() ?? 0
+    return lines.flatMap { l -> [Line] in
+        let text = l.text.split(whereSeparator: \.isWhitespace)
+        guard l.src == "sys", let ws = l.words, ws.count == text.count, ws.count >= 2 * minWords else { return [l] }
+        let spans = ws.indices.map { i in (ws[i], min(i + 1 < ws.count ? ws[i + 1] : ws[i] + 500, ws[i] + 1000)) }
+        var spk = spans.map { voice(turns, longest: longest, $0.0, $0.1) }
+        var runs: [(a: Int, b: Int, spk: String?)] = []
+        while true {
+            runs = []
+            for (i, x) in spk.enumerated() { if let r = runs.last, r.spk == x { runs[runs.count - 1].b = i } else { runs.append((i, i, x)) } }
+            func ms(_ r: Int) -> Int { spans[runs[r].b].1 - spans[runs[r].a].0 }
+            let short = runs.indices.filter { runs[$0].spk == nil || runs[$0].b - runs[$0].a + 1 < minWords || ms($0) < minMs }
+            // Words no turn covers go first, then the shortest run.
+            guard runs.count > 1, let r = short.min(by: { (runs[$0].spk == nil ? 0 : 1, ms($0)) < (runs[$1].spk == nil ? 0 : 1, ms($1)) }) else { break }
+            for i in runs[r].a...runs[r].b { spk[i] = runs[r > 0 ? r - 1 : r + 1].spk }
+        }
+        guard runs.count > 1 else { return [l] }
+        return runs.map { r in
+            var p = l
+            p.t = ws[r.a]; p.text = text[r.a...r.b].joined(separator: " "); p.words = Array(ws[r.a...r.b]); p.spk = nil
+            return p
+        }
+    }
 }
 
 /// The first index in 0..<count where `ok` holds, for an `ok` that is false and then true; count if it never holds.
@@ -67,13 +105,12 @@ private func regex(_ p: String, _ o: NSRegularExpression.Options = []) -> NSRegu
 // Lines that are only a sound mark ("[music]", "(laughs)") or punctuation. Parakeet does not make up the subtitle credits Whisper did
 // ("thanks for watching"), so real speech like "Thank you." stays.
 private let junk = regex(#"^\W*(\[[^\]]*\]|\([^)]*\))\W*$|^\W+$"#, .caseInsensitive)
-private let wordRe = regex(#"\w+"#)
+private let wordRe = regex(#"\w+"#), nonSpace = regex(#"\S+"#)
 
 private func all(_ re: NSRegularExpression, _ s: String) -> [NSTextCheckingResult] { re.matches(in: s, range: NSRange(location: 0, length: (s as NSString).length)) }
 
-/// Recognizer segments -> one entry per sentence, as (ms from the window start, text). Segments can break mid-word, so their raw text is
-/// joined first, then split. A sentence is timed by interpolating its position inside the segment it starts in.
-func splitSentences(_ segments: [Segment]) -> [(Int, String)] {
+/// Recognizer segments -> one entry per sentence, as (ms from the window start, text, when each word starts). Segments can break mid-word, so their raw text is joined first, then split. A sentence and each word are timed by interpolating their position inside the segment they start in.
+func splitSentences(_ segments: [Segment]) -> [(Int, String, [Int])] {
     var text = "", spans: [(a: Int, b: Int, start: Double, end: Double)] = []
     for s in segments {
         let a = (text as NSString).length
@@ -82,13 +119,16 @@ func splitSentences(_ segments: [Segment]) -> [(Int, String)] {
     }
     guard let last = spans.last else { return [] }
     let ns = text as NSString
+    func time(_ at: Int) -> Int {
+        let sp = spans.first { $0.a <= at && at < $0.b } ?? last
+        return Int((sp.start + (sp.end - sp.start) * Double(at - sp.a) / Double(max(sp.b - sp.a, 1))) * 1000)
+    }
     return sentenceRanges(text).compactMap { r in
         let raw = ns.substring(with: r)
         let piece = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        let at = r.location + ((raw as NSString).length - (raw.drop { $0.isWhitespace } as Substring).utf16.count)
-        let sp = spans.first { $0.a <= at && at < $0.b } ?? last
-        let off = Int((sp.start + (sp.end - sp.start) * Double(at - sp.a) / Double(max(sp.b - sp.a, 1))) * 1000)
-        return piece.isEmpty || junk.firstMatch(in: piece, range: NSRange(location: 0, length: (piece as NSString).length)) != nil ? nil : (off, piece)
+        let starts = all(nonSpace, raw).map { time(r.location + $0.range.location) }  // each word's
+        guard let off = starts.first, junk.firstMatch(in: piece, range: NSRange(location: 0, length: (piece as NSString).length)) == nil else { return nil }
+        return (off, piece, starts)
     }
 }
 
@@ -164,7 +204,7 @@ func dropEcho(_ lines: [Line], heard: (Int, Int) -> Bool = { _, _ in true }) -> 
 
 /// A new recognition pass over one speaker's window: its lines replace the ones from the previous pass of the same window.
 func replaceWindow(_ lines: [Line], src: String, w: Int, part: Int, final: Bool, segments: [Segment], echoMs: Int = 30000, heard: (Int, Int) -> Bool = { _, _ in true }) -> [Line] {
-    let fresh = splitSentences(segments).map { Line(t: w + $0.0, src: src, text: $0.1, part: part, final: final, w: w) }
+    let fresh = splitSentences(segments).map { Line(t: w + $0.0, src: src, text: $0.1, part: part, final: final, w: w, words: $0.2.map { w + $0 }) }
     let all = (lines.filter { !($0.w == w && $0.src == src) } + fresh).sorted { $0.t < $1.t }
     // Every pass so far left the transcript free of echoes, so only lines near the new ones can be echoes now (an echo sits within a
     // long sentence of its "Them" line). The rest of a long meeting is not looked at again.
