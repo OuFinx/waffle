@@ -74,12 +74,12 @@ final class Recorder {
     }
 
     func start() async {
-        // The speaker model downloads once from Hugging Face; until it is there, "Them" has no speaker labels. The AMI variant measured
-        // best on a real meeting, also after an Opus 24 kbit/s round trip like a call (17.9% DER against 35-41% for the others).
-        // ponytail: it tells apart at most 4 voices live; the pass after the call has no such limit.
+        // The speaker model downloads once from Hugging Face; until it is there, "Them" has no speaker labels. Nemotron 3 (Sortformer, up to
+        // 8 voices, 2.9 s behind): on 16 real meetings of 3 to 9 people, plain and after an Opus 24 kbit/s round trip like a call, it gave
+        // the right voice to 86-98% of lines, against 64-91% for LS-EEND, which told apart at most 4.
         if Model.tellVoicesApart { Task.detached(priority: .utility) { [weak self] in
             do {
-                let d = try await LSEENDDiarizer(variant: .ami, stepSize: .step500ms)
+                let d = Nemotron3Diarizer(config: .fast32, models: try await Nemotron3Models.loadFromHuggingFace(config: .fast32))
                 await self?.sys.setDiarizer(d)
             } catch {
                 self?.error("Speaker labels are off: \(error.localizedDescription)")
@@ -345,14 +345,15 @@ actor Source {
     // Recent audio for the echo check (system audio only): the pieces of the last 5 s, as they came.
     private var recentPieces: [Piece] = []
     // Live speaker labels (system audio only): its own clock, as it is fed room noise for gaps of at most 2 s.
-    private var diarizer: LSEENDDiarizer?
+    private var diarizer: Nemotron3Diarizer?
     private var diarClock = ClockMap()
     private var diarFed = 0
+    private var diarFrames = 0  // 10 ms frames the diarizer gave back so far
     private var diarPending: [Float] = []
 
     init(_ name: String, _ rec: Recorder) { self.name = name; self.rec = rec }
 
-    func setDiarizer(_ d: LSEENDDiarizer) { diarizer = d }
+    func setDiarizer(_ d: Nemotron3Diarizer) { diarizer = d }
 
     func feed(_ p: Piece) async {
         busy = true
@@ -467,12 +468,11 @@ actor Source {
         if let d = diarizer {
             let rest = diarPending
             diarPending = []
-            let u = try? await Engine.shared.exclusive { () throws -> DiarizerTimelineUpdate? in
-                if !rest.isEmpty { try d.addAudio(rest, sourceSampleRate: 16000); _ = try d.process() }
-                return try d.finalizeSession()
+            let r = try? await Engine.shared.exclusive { () throws -> [Nemotron3ChunkResult] in
+                d.appendAudio(rest)
+                return try d.finishStream()
             }
-            emit(u)
-            emit(u?.tentativeSegments)  // finalizeSession settles these after it returns: they are the last turns
+            emit(r)
             diarizer = nil
         }
         let t = tape
@@ -507,21 +507,25 @@ actor Source {
         let a = diarPending
         diarPending = []
         diarFed += a.count
-        let u = try? await Engine.shared.exclusive { () throws -> DiarizerTimelineUpdate? in
-            try d.addAudio(a, sourceSampleRate: 16000)
-            return try d.process()
+        let r = try? await Engine.shared.exclusive { () throws -> [Nemotron3ChunkResult] in
+            d.appendAudio(a)
+            return try d.processBufferedAudio()
         }
-        emit(u)
+        emit(r)
     }
 
-    /// Diarizer segments -> turns on the wall clock. Voices are "1", "2"... for this recording.
-    private func emit(_ update: DiarizerTimelineUpdate??) { emit(update??.finalizedSegments) }
-
-    private func emit(_ segments: [DiarizerSegment]?) {
-        guard let segs = segments, !segs.isEmpty else { return }
-        rec.turns(segs.map { s in
-            Turn(start: Int(diarClock.ms(Int(Double(s.startTime) * 16000))), end: Int(diarClock.ms(Int(Double(s.endTime) * 16000))), spk: String(s.speakerIndex + 1))
-        })
+    /// Diarizer chunks (2.56 s of 10 ms frames each) -> turns on the wall clock, each chunk on its own: a voice that talks on is a run
+    /// of turns. Voices are "1", "2"... for this recording.
+    private func emit(_ chunks: [Nemotron3ChunkResult]?) {
+        var turns: [Turn] = []
+        for c in chunks ?? [] {
+            let at = Double(diarFrames) / 100
+            for s in Nemotron3Diarizer.segments(probabilities: c.probabilities, frameCount: c.frameCount, numSpeakers: c.numSpeakers) {
+                turns.append(Turn(start: Int(diarClock.ms(Int((at + Double(s.startSeconds)) * 16000))), end: Int(diarClock.ms(Int((at + Double(s.endSeconds)) * 16000))), spk: String(s.speakerIndex + 1)))
+            }
+            diarFrames += c.frameCount
+        }
+        if !turns.isEmpty { rec.turns(turns) }
     }
 }
 

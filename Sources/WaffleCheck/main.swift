@@ -178,16 +178,22 @@ for (a, b, text) in pairs where have.contains(a) && have.contains(b) {
     let p1 = purity(offline, d.who)
     print(String(format: "speakers after the call (%@/%@): %d found, %.0f%% of speech right, tape %.0f of %.0f s, %.1f s", a, b, Set(offline.map(\.spk)).count, p1 * 100, tape.seconds, Double(d.audio.count) / 16000, Date().timeIntervalSince(t1)))
     check(tape.seconds >= Double(d.who.map { $0.to - $0.from }.reduce(0, +)) / 16000 * 0.95, "\(a)/\(b): the tape keeps the speech")
-    let ls = try await LSEENDDiarizer(variant: .ami, stepSize: .step500ms)
-    var liveTurns: [(start: Double, end: Double, spk: String)] = []
+    let nd = Nemotron3Diarizer(config: .fast32, models: try await Nemotron3Models.loadFromHuggingFace(config: .fast32))
+    var liveTurns: [(start: Double, end: Double, spk: String)] = [], frames = 0
+    func add(_ cs: [Nemotron3ChunkResult]) {  // as Source.emit: each chunk on its own
+        for c in cs {
+            let at = Double(frames) / 100
+            liveTurns += Nemotron3Diarizer.segments(probabilities: c.probabilities, frameCount: c.frameCount, numSpeakers: c.numSpeakers).map { (at + Double($0.startSeconds), at + Double($0.endSeconds), String($0.speakerIndex)) }
+            frames += c.frameCount
+        }
+    }
     var i = 0
     while i < d.audio.count {
-        let x = Array(d.audio[i..<min(i + 8000, d.audio.count)])
-        try ls.addAudio(x, sourceSampleRate: 16000)
-        if let u = try ls.process() { liveTurns += u.finalizedSegments.map { (Double($0.startTime), Double($0.endTime), String($0.speakerIndex)) } }
+        nd.appendAudio(Array(d.audio[i..<min(i + 8000, d.audio.count)]))
+        add(try nd.processBufferedAudio())
         i += 8000
     }
-    if let u = try ls.finalizeSession() { liveTurns += (u.finalizedSegments + u.tentativeSegments).map { (Double($0.startTime), Double($0.endTime), String($0.speakerIndex)) } }
+    add(try nd.finishStream())
     let p2 = purity(liveTurns, d.who)
     print(String(format: "live speakers (%@/%@): %d found, %.0f%% of speech right", a, b, Set(liveTurns.map(\.spk)).count, p2 * 100))
     check(max(p1, p2) >= 0.8, "\(a)/\(b): the voices told apart (live or after the call)")

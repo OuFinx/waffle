@@ -474,10 +474,9 @@ final class Model: ObservableObject {
         }
     }
 
-    /// After the call, the other side's voices are told apart again over the whole call (no limit of 4 voices, about 10 s for an hour),
-    /// and this recording's "Them" lines get those voices. The text stays as it was: measured on real recordings, the live text is as good
-    /// as recognizing each utterance on its own. Names given to voices carry over; the live voices stay when the whole-call ones tell
-    /// fewer voices apart (similar voices lumped together on a short call).
+    /// After the call, the other side's voices are told apart again over the whole call (about 10 s for an hour), and this recording's
+    /// "Them" lines that got no voice live get those voices. The text stays as it was: measured on real recordings, the live text is as good
+    /// as recognizing each utterance on its own. Names given to voices carry over.
     private func polish(_ id: String, _ tapes: Tapes) {
         let part = self.part, live = lines.filter { $0.part == part }, talking = self.talking, tape = tapes.sys, names = self.live.names
         let invited = (Store.meta(id)["calendar"] as? [String: Any])?["invited"] as? [String] ?? []
@@ -487,12 +486,14 @@ final class Model: ObservableObject {
             let most = max(people, invited.count) > 0 ? max(people, invited.count) + 1 : nil
             let segs = (try? await Engine.shared.diarize(tape.floats, maxSpeakers: most)) ?? []
             let turns = segs.map { Turn(start: Int(tape.clock.ms(Int($0.start * 16000))), end: Int(tape.clock.ms(Int($0.end * 16000))), spk: $0.spk) }
-            let liveVoices = Set(live.compactMap { $0.src == "sys" ? $0.spk : nil }.filter { !$0.hasPrefix("@") })
-            let use = !turns.isEmpty && Set(turns.map(\.spk)).count >= max(1, liveVoices.count)
+            let use = !turns.isEmpty && live.contains { $0.src == "sys" && $0.spk == nil }
             var relabeled = live
             if use {
                 let carried = carryVoices(live: live, turns: turns)
                 relabeled = labelFromScreen(labelSpeakers(live, turns.map { Turn(start: $0.start, end: $0.end, spk: carried[$0.spk] ?? "\(part)-\($0.spk)") }), talking, names: names)
+                // Only lines the live voices missed (the speaker model still loading, a gap): on 16 real meetings the live voices were
+                // right more often than the whole-call ones (94% of lines against 89%), which moved lines that were right.
+                relabeled = zip(live, relabeled).map { $0.spk == nil ? $1 : $0 }
             }
             log.info("speakers after the call: \(Set(turns.map(\.spk)).count) voices in \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s, \(use ? "used" : "kept the live ones")")
             DispatchQueue.main.async { [self] in

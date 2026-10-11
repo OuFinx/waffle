@@ -302,7 +302,7 @@ final class ModelDownload: ObservableObject {
             }
             do {
                 _ = try await VadManager(config: .default)
-                _ = try await LSEENDDiarizer(variant: .ami, stepSize: .step500ms)
+                _ = try await Nemotron3Models.loadFromHuggingFace(config: .fast32)
                 try await OfflineDiarizerManager().prepareModels()
                 speakersDone = true
             } catch {

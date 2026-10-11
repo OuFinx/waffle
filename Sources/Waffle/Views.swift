@@ -1498,7 +1498,7 @@ struct TranscriptSettings: View {
         } header: {
             Text("Transcript")
         } footer: {
-            Text("After the call, Waffle tells the other side's voices apart once more over the whole call (no limit on how many; live it tells at most 4), then writes the notes; about 10 seconds for an hour. The sound for it stays in memory only and is gone after. Muted in Zoom: what you say is not for the call, so it stays out of the notes (needs Accessibility, see Speaker names).")
+            Text("After the call, Waffle tells the other side's voices apart once more over the whole call, for the lines that got no voice live, then writes the notes; about 10 seconds for an hour. The sound for it stays in memory only and is gone after. Muted in Zoom: what you say is not for the call, so it stays out of the notes (needs Accessibility, see Speaker names).")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

@@ -677,7 +677,7 @@ func screenSpeakers(_ turns: [Turn], _ talking: [(t: Int, name: String)], kept: 
 }
 
 /// Who the call window showed talking goes before the diarized voice only where the voice can not say it: the live diarizer tells apart
-/// at most 4 voices, so on a bigger call several people share one, and its name. A "Them" line gets the person the call window showed as
+/// at most 8 voices and now and then lumps two together, so several people can share one, and its name. A "Them" line gets the person the call window showed as
 /// the only one talking during it, as the voice "@Name": with no voice, from 1 s before the line to 4 s after; with a voice named
 /// another name (`names`), from 1 s after the line starts (the app shows a voice a moment late) until 1 s after the next line starts, at
 /// most 10 s. A voice with no name yet is left alone: naming the lines a look happened to fall on showed one person as a name on some
