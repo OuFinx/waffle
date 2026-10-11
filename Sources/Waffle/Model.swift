@@ -318,11 +318,15 @@ final class Model: ObservableObject {
         selfName = nil
         guard Engine.downloaded else { status = .done; Store.updateMeta(id, ["recording": false]); showSetup = true; return fail("The speech models are not downloaded yet: finish the setup first") }
         Engine.shared.retain()
+        var invited: [String] = []
         if Agenda.enabled, let e = Agenda.current() {
+            invited = e.invited
             var meta: [String: Any] = ["calendar": ["title": e.title, "invited": e.invited]]
             if Store.title(id) == nil, !e.title.isEmpty { meta["title"] = ["en": e.title] }
             Store.updateMeta(id, meta)
         }
+        let terms = spellingTerms(invited: invited, list: UserDefaults.standard.string(forKey: "terms") ?? "")
+        Task.detached { await Engine.shared.spell(terms) }
         if ScreenNames.enabled {
             let s = ScreenNames()
             s.onLook = { [weak self] in self?.addLook(id, $0) }
@@ -493,7 +497,7 @@ final class Model: ObservableObject {
             var fixed = live
             // tape.floats each time: an hour of it is 230 MB, so not two copies at once
             if let a = try? await Engine.shared.transcribe(tape.floats), let b = try? await Engine.shared.transcribe(quiet(Int(shift * 16000)) + tape.floats) {
-                fixed = refineText(live, a: tapeWords(a, tape.clock), b: tapeWords(b, tape.clock, from: shift))
+                fixed = refineText(live, a: tapeWords(a, tape.clock), b: tapeWords(b, tape.clock, from: shift), keep: Engine.shared.spelled)
             }
             let changed = zip(live, fixed).filter { $0.text != $1.text }.count
             log.info("text after the call: \(changed) of \(live.count) lines changed in \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s")

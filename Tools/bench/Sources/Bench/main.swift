@@ -1,7 +1,8 @@
 // A meeting recording (16 kHz wav) as the "Them" stream through the app's own code: Logic.swift and Engine.swift are the app's files
 // (symlinks); what Recorder.swift's Source and Model.polish do around them is re-created here with the same constants. Change this file
 // along with Source, refine or polish. `Bench <wav> <out.json>` writes the lines with their live and after-the-call voices; `Bench <wav> <out.json>
-// whole` recognizes the whole file at once instead (the model's own level, for comparison).
+// whole` recognizes the whole file at once instead (the model's own level, for comparison); `Bench <wav> <out.json> <terms.txt>` spells
+// the terms in the file (one per line) as Model does with the calendar's and the user's names (Engine.spell).
 import FluidAudio
 import Foundation
 
@@ -22,7 +23,9 @@ _ = try await AsrModels.download(version: Engine.asrVersion)
 _ = try await VadManager(config: .default)
 Engine.shared.retain()
 _ = try await Engine.shared.transcribe(quiet(16000))
-if CommandLine.arguments.count > 3 {
+let extra = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : ""
+if !extra.isEmpty, extra != "whole" { await Engine.shared.spell(try String(contentsOfFile: extra, encoding: .utf8).split(separator: "\n").map(String.init)) }
+if extra == "whole" {
     let t0 = Date()
     let t = try await Engine.shared.transcribe(audio).map(\.text).joined()
     try write(["audio": Double(audio.count) / 16000, "liveTime": Date().timeIntervalSince(t0), "lines": [["t": 0.0, "text": t, "live": "", "polish": ""]]])
@@ -90,7 +93,7 @@ var live = labelSpeakers(lines, turns)  // Model.labelled, no call window
 // Model.refine: the tape recognized twice more, the words both passes agree on go in
 let t3 = Date(), shift = 5.5
 let ta = try await Engine.shared.transcribe(tape.floats), tb = try await Engine.shared.transcribe(quiet(Int(shift * 16000)) + tape.floats)
-let refined = refineText(live, a: tapeWords(ta, tape.clock), b: tapeWords(tb, tape.clock, from: shift))
+let refined = refineText(live, a: tapeWords(ta, tape.clock), b: tapeWords(tb, tape.clock, from: shift), keep: Engine.shared.spelled)
 let refineTime = Date().timeIntervalSince(t3)
 let liveText = live.map(\.text).joined(separator: " ")
 live = refined

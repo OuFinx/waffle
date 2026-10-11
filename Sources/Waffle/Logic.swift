@@ -100,6 +100,68 @@ func label(_ l: Line, _ names: [String: String]) -> String { l.src == "mic" ? "M
 
 typealias Segment = (start: Double, end: Double, text: String)
 
+/// The terms to spell right in a recording: each word of the invited people's names (said apart, "Oleg" or "Petrenko") and each entry of
+/// the user's list, separated by commas or new lines (kept whole: "Meeting Recorder").
+func spellingTerms(invited: [String], list: String) -> [String] {
+    let names = invited.flatMap { $0.split(whereSeparator: { $0 == " " || $0 == "-" }).map(String.init) }
+    let own = list.split(whereSeparator: { $0 == "," || $0.isNewline }).map { $0.trimmingCharacters(in: .whitespaces) }
+    return Array(Set((names + own).filter { $0.count >= 3 })).sorted()
+}
+
+/// The Mac's English word list (/usr/share/dict/words, on every Mac), lowercase entries only: names there are capitalised.
+let englishWords: Set<String> = Set(((try? String(contentsOfFile: "/usr/share/dict/words", encoding: .utf8)) ?? "").split(separator: "\n").filter { $0.first?.isLowercase == true }.map(String.init))
+
+/// An everyday English word, in any of its plain forms ("meetings", "doing", "stopped", "I'm"); the list has the base forms only.
+func isCommonWord(_ word: String, _ words: Set<String> = englishWords) -> Bool {
+    let w = word.lowercased()
+    if ["'m", "'ll", "'d", "'re", "'ve", "n't"].contains(where: { w.hasSuffix($0) }) { return true }  // I'm, we'll, you'd
+    let s = w.hasSuffix("'s") ? String(w.dropLast(2)) : w
+    if words.contains(s) { return true }
+    for (suffix, add) in [("s", ""), ("es", ""), ("ed", ""), ("ed", "e"), ("d", ""), ("ing", ""), ("ing", "e"), ("ies", "y"), ("ied", "y"), ("er", ""), ("ly", "")] where s.hasSuffix(suffix) && s.count - suffix.count >= 2 {
+        let stem = String(s.dropLast(suffix.count))
+        if words.contains(stem + add) || (stem.count >= 3 && stem.last == stem.dropLast().last && words.contains(String(stem.dropLast()))) { return true }
+    }
+    return false
+}
+
+/// Whether a vocabulary term may replace what the main model wrote. Wrong corrections are worse than wrong transcriptions, so only when
+/// it is the same letters written apart or in another case ("pre segmentation", "smartkom"), or a near spelling that starts with the same
+/// letter and holds no everyday word ("Jacobson" to "Jakobson"; never "data" to "Dalan" or "doing" to "Boeing"). A possessive stays.
+func mayRespell(_ heard: String, as term: String, _ common: (String) -> Bool = { isCommonWord($0) }) -> Bool {
+    let letters = { (s: String) in s.lowercased().filter(\.isLetter) }
+    let h = letters(heard), t = letters(term)
+    if h == t { return true }
+    if h == t + "s" || h.first != t.first { return false }
+    return !heard.split(whereSeparator: { !$0.isLetter && $0 != "'" }).contains { common(String($0)) }
+}
+
+/// Whether a pass's text holds anything mayRespell could let a term replace: one to three words that are a term written apart or in
+/// another case, or a word that is not an everyday word, not already a term, and starts like one. Most passes hold nothing of the kind,
+/// and then the second model is not run on them (the same result, a fraction of the time).
+func worthSpelling(_ text: String, _ terms: [String], _ common: (String) -> Bool = { isCommonWord($0) }) -> Bool {
+    let letters = { (s: Substring) in s.lowercased().filter(\.isLetter) }
+    let words = text.split(whereSeparator: { !$0.isLetter && $0 != "'" })
+    let spelled = Set(terms.map { letters(Substring($0)) }), firsts = Set(spelled.compactMap(\.first))
+    for i in words.indices {
+        let w = letters(words[i])
+        if let f = w.first, firsts.contains(f), !spelled.contains(w), !common(String(words[i])) { return true }
+        for n in 2...3 where i + n <= words.count && spelled.contains(words[i..<i + n].map(letters).joined()) { return true }
+    }
+    return false
+}
+
+/// The tokens of a pass with some token runs spelled as a vocabulary term: each run becomes one token with the term, over the run's time,
+/// keeping the run's trailing punctuation. Runs index `tokens` (half open) and must not overlap.
+func respell(_ tokens: [Segment], _ fixes: [(Range<Int>, String)]) -> [Segment] {
+    var out = tokens
+    for (r, term) in fixes.sorted(by: { $0.0.lowerBound > $1.0.lowerBound }) where !r.isEmpty && r.upperBound <= out.count {
+        let last = out[r.upperBound - 1].text
+        let tail = String(last.reversed().prefix { ".,?!;:".contains($0) }.reversed())
+        out.replaceSubrange(r, with: [(out[r.lowerBound].start, out[r.upperBound - 1].end, " " + term + tail)])
+    }
+    return out
+}
+
 
 private func regex(_ p: String, _ o: NSRegularExpression.Options = []) -> NSRegularExpression { try! NSRegularExpression(pattern: p, options: o) }
 // Lines that are only a sound mark ("[music]", "(laughs)") or punctuation. Parakeet does not make up the subtitle credits Whisper did
@@ -1459,7 +1521,8 @@ private func wordKey(_ s: some StringProtocol) -> String { s.lowercased().filter
 /// for a word read otherwise, not the live one), the two outvote the live text. Nothing is taken out and every line keeps its time, so
 /// the speaker labels stay. Measured on the meeting bench (16 meetings, plain and as a call): 24.5% of words wrong before, 24.0% after;
 /// most of it words the live pass missed in overlapping or quiet speech.
-func refineText(_ lines: [Line], a: [TapeWord], b: [TapeWord], near: Int = 600) -> [Line] {
+func refineText(_ lines: [Line], a: [TapeWord], b: [TapeWord], near: Int = 600, keep: [String] = []) -> [Line] {
+    let kept = Set(keep.flatMap { $0.split(separator: " ").map(wordKey) })  // spelled terms (Engine.spell): the tape's passes are not spelled, so they would undo them
     let sys = lines.indices.filter { lines[$0].src == "sys" }
     let bk = b.map { wordKey($0.text) }
     func inB(_ k: String, _ ms: Int) -> Bool {
@@ -1494,7 +1557,7 @@ func refineText(_ lines: [Line], a: [TapeWord], b: [TapeWord], near: Int = 600) 
         while i > 0 || k > 0 {
             if i > 0, k > 0, d[i * w + k] == d[(i - 1) * w + k - 1] + cost(i, k) {
                 let ms = aw[k - 1].ms
-                if cost(i, k) > 0, !ak[k - 1].isEmpty, inB(ak[k - 1], ms), !inB(lk[i - 1], ms) {
+                if cost(i, k) > 0, !ak[k - 1].isEmpty, !kept.contains(lk[i - 1]), inB(ak[k - 1], ms), !inB(lk[i - 1], ms) {
                     let core = String(aw[k - 1].text.trimmingCharacters(in: .whitespaces).reversed().drop { !$0.isLetter && !$0.isNumber }.reversed())
                     raw[i - 1] = core + String(raw[i - 1].reversed().prefix { !$0.isLetter && !$0.isNumber }.reversed())  // the live punctuation stays
                 }
