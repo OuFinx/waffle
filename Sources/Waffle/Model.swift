@@ -476,15 +476,45 @@ final class Model: ObservableObject {
             Store.saveLines(id, lines)
             saveScreenNames(id)
             Store.updateMeta(id, ["recording": false])
-            guard Model.tellVoicesApart, Model.polishEnabled, tapes.sys.seconds >= 3, !tapes.sys.full else { return wrapUp(id) }
-            detail = "telling the voices apart"
-            polish(id, tapes)
+            guard tapes.sys.seconds >= 3, !tapes.sys.full else { return wrapUp(id) }
+            detail = "reading the other side again"
+            refine(id, tapes)
+        }
+    }
+
+    /// After the call, the other side's speech on the tape is recognized twice more and the words both passes agree on go into this
+    /// recording's "Them" lines where the live text missed them or read them otherwise (see refineText; about 40 s for an hour). Then the
+    /// voices, or the notes.
+    private func refine(_ id: String, _ tapes: Tapes) {
+        let part = self.part, live = lines.filter { $0.part == part && $0.src == "sys" }, tape = tapes.sys
+        Task.detached(priority: .userInitiated) { [self] in
+            let started = Date(), shift = 5.5  // half of the 11 s pieces a long pass is cut in
+            var fixed = live
+            // tape.floats each time: an hour of it is 230 MB, so not two copies at once
+            if let a = try? await Engine.shared.transcribe(tape.floats), let b = try? await Engine.shared.transcribe(quiet(Int(shift * 16000)) + tape.floats) {
+                fixed = refineText(live, a: tapeWords(a, tape.clock), b: tapeWords(b, tape.clock, from: shift))
+            }
+            let changed = zip(live, fixed).filter { $0.text != $1.text }.count
+            log.info("text after the call: \(changed) of \(live.count) lines changed in \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s")
+            DispatchQueue.main.async { [self] in
+                guard activeId == id else { return }
+                if changed > 0 {
+                    let byTime = Dictionary(zip(live, fixed).map { ($0.t, ($0.text, $1.text)) }) { a, _ in a }
+                    lines = lines.map { l in  // lines deleted or edited meanwhile stay as they are
+                        guard l.part == part, l.src == "sys", let p = byTime[l.t], l.text == p.0 else { return l }
+                        var x = l; x.text = p.1; return x
+                    }
+                    Store.saveLines(id, lines)
+                }
+                guard Model.tellVoicesApart, Model.polishEnabled else { return wrapUp(id) }
+                detail = "telling the voices apart"
+                polish(id, tapes)
+            }
         }
     }
 
     /// After the call, the other side's voices are told apart again over the whole call (about 10 s for an hour), and this recording's
-    /// "Them" lines that got no voice live get those voices. The text stays as it was: measured on real recordings, the live text is as good
-    /// as recognizing each utterance on its own. Names given to voices carry over.
+    /// "Them" lines that got no voice live get those voices. Names given to voices carry over.
     private func polish(_ id: String, _ tapes: Tapes) {
         let part = self.part, live = lines.filter { $0.part == part }, talking = self.talking, tape = tapes.sys, names = self.live.names
         let invited = (Store.meta(id)["calendar"] as? [String: Any])?["invited"] as? [String] ?? []

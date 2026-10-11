@@ -1195,7 +1195,7 @@ struct ClockMap {
     }
 }
 
-/// The other side's speech kept for telling the voices apart after the call, in memory only: 16-bit, only the stretches around speech
+/// The other side's speech kept for reading it again and telling the voices apart after the call, in memory only: 16-bit, only the stretches around speech
 /// (from 768 ms before to a second after), each with its wall time. Stops taking more at `cap` samples (2 hours) and says so.
 struct Tape {
     var cap = 16000 * 3600 * 2
@@ -1395,6 +1395,92 @@ func addPrint(_ old: (print: [Float], n: Int)?, _ new: [Float]) -> (print: [Floa
     guard let old, old.print.count == new.count else { return (unit(new), 1) }
     let n = Float(old.n)
     return (unit(zip(old.print, unit(new)).map { ($0 * n + $1) / (n + 1) }), old.n + 1)
+}
+
+// MARK: after a call: the other side's words read again
+
+/// A word of a recognition pass over the tape: when it starts (epoch ms) and its text, with the space before it.
+typealias TapeWord = (ms: Int, text: String)
+
+/// The words of a pass over the tape, timed by the tape's clock. `from`: seconds of room noise put before the tape, dropped.
+func tapeWords(_ tokens: [Segment], _ clock: ClockMap, from: Double = 0) -> [TapeWord] {
+    var out: [TapeWord] = []
+    for t in tokens where t.start >= from - 0.05 {
+        let ms = Int(clock.ms(Int(max(0, t.start - from) * 16000)))
+        if t.text.hasPrefix(" ") || out.isEmpty { out.append((ms, t.text)) } else { out[out.count - 1].text += t.text }
+    }
+    return out
+}
+
+private func wordKey(_ s: some StringProtocol) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
+
+/// After the call the tape is recognized twice more, its 11 s pieces cut at different places (`a`, `b`): with the live text, three
+/// readings. Where `a` has a word the live "Them" text lacks, or reads a live word otherwise, and `b` has that word within `near` ms (and,
+/// for a word read otherwise, not the live one), the two outvote the live text. Nothing is taken out and every line keeps its time, so
+/// the speaker labels stay. Measured on the meeting bench (16 meetings, plain and as a call): 24.5% of words wrong before, 24.0% after;
+/// most of it words the live pass missed in overlapping or quiet speech.
+func refineText(_ lines: [Line], a: [TapeWord], b: [TapeWord], near: Int = 600) -> [Line] {
+    let sys = lines.indices.filter { lines[$0].src == "sys" }
+    let bk = b.map { wordKey($0.text) }
+    func inB(_ k: String, _ ms: Int) -> Bool {
+        var i = firstIndex(b.count) { b[$0].ms >= ms - near }
+        while i < b.count, b[i].ms <= ms + near { if bk[i] == k { return true }; i += 1 }
+        return false
+    }
+    // A line that starts with no word of `a` around it: a cut there splits no word.
+    func pause(_ t: Int) -> Bool { let i = firstIndex(a.count) { a[$0].ms >= t - 1500 }; return i == a.count || a[i].ms > t + 300 }
+    func count(_ i: Int) -> Int { lines[i].text.split(separator: " ").count }
+    var out = lines, from = 0, j = 0
+    while from < sys.count {
+        // Pieces of 400 to 2000 live words (ponytail: the alignment is n*m, so a long call is aligned piece by piece)
+        var to = from + 1, n = count(sys[from])
+        while to < sys.count, n < 2000, n < 400 || !pause(lines[sys[to]].t) { n += count(sys[to]); to += 1 }
+        let end = to < sys.count ? lines[sys[to]].t : Int.max
+        var aw: [TapeWord] = []
+        while j < a.count, a[j].ms < end { aw.append(a[j]); j += 1 }
+        let lw = sys[from..<to].flatMap { i in lines[i].text.split(separator: " ").map { (line: i, raw: String($0)) } }
+        let lk = lw.map { wordKey($0.raw) }, ak = aw.map { wordKey($0.text) }
+        from = to
+        let m = ak.count, w = m + 1
+        guard !lw.isEmpty, m > 0 else { continue }
+        // edit distance between the live words and the words of `a`
+        var d = [Int32](repeating: 0, count: (lw.count + 1) * w)
+        for i in 0...lw.count { d[i * w] = Int32(i) }
+        for k in 0...m { d[k] = Int32(k) }
+        func cost(_ i: Int, _ k: Int) -> Int32 { lk[i - 1] == ak[k - 1] ? 0 : 1 }
+        for i in 1...lw.count { for k in 1...m { d[i * w + k] = min(d[(i - 1) * w + k] + 1, d[i * w + k - 1] + 1, d[(i - 1) * w + k - 1] + cost(i, k)) } }
+        var raw = lw.map(\.raw), before = [String](repeating: "", count: lw.count + 1)  // before[i]: words that go in before live word i
+        var i = lw.count, k = m
+        while i > 0 || k > 0 {
+            if i > 0, k > 0, d[i * w + k] == d[(i - 1) * w + k - 1] + cost(i, k) {
+                let ms = aw[k - 1].ms
+                if cost(i, k) > 0, !ak[k - 1].isEmpty, inB(ak[k - 1], ms), !inB(lk[i - 1], ms) {
+                    let core = String(aw[k - 1].text.trimmingCharacters(in: .whitespaces).reversed().drop { !$0.isLetter && !$0.isNumber }.reversed())
+                    raw[i - 1] = core + String(raw[i - 1].reversed().prefix { !$0.isLetter && !$0.isNumber }.reversed())  // the live punctuation stays
+                }
+                i -= 1; k -= 1
+            } else if k > 0, i == 0 || d[i * w + k] == d[i * w + k - 1] + 1 {
+                if !ak[k - 1].isEmpty, inB(ak[k - 1], aw[k - 1].ms) { before[i] = aw[k - 1].text.trimmingCharacters(in: .whitespaces) + " " + before[i] }
+                k -= 1
+            } else {
+                i -= 1
+            }
+        }
+        // Words before a live word go with the line of the word before them (the one being said), at the start with the first line.
+        var texts: [Int: String] = [:], tails: [Int: String] = [:]  // tails: words after a line's last live word
+        for (x, l) in lw.enumerated() {
+            if x > 0, lw[x - 1].line != l.line { tails[lw[x - 1].line] = before[x] } else { texts[l.line, default: ""] += before[x] }
+            texts[l.line, default: ""] += raw[x] + " "
+        }
+        tails[lw[lw.count - 1].line] = before[lw.count]
+        for (l, t) in texts {
+            var text = t.trimmingCharacters(in: .whitespaces), tail = (tails[l] ?? "").trimmingCharacters(in: .whitespaces)
+            // "See you." and "then" -> "See you then."
+            if let p = text.last, ".!?".contains(p), let q = tail.last { text.removeLast(); if q.isLetter || q.isNumber { tail.append(p) } }
+            out[l].text = tail.isEmpty ? text : text + " " + tail
+        }
+    }
+    return out
 }
 
 /// A call with one other person on the invite and one voice on the other side: that voice is that person.
