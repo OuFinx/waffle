@@ -72,6 +72,7 @@ Then join a call: Waffle notices the call app taking the microphone (Zoom, Teams
 - **Stops by itself** when the call app releases the microphone or after a long silence.
 
 **After the call**
+- **Missed words filled in**: the other side's speech is recognized twice more over the whole call, and words both passes agree on go in where the live text missed them or heard them otherwise (about 40 seconds for an hour).
 - **Voices sorted out**: Waffle tells the other side's voices apart once more over the whole call, without the live limit of 4 (about 10 seconds for an hour; Settings > Transcript).
 - **Summary**: topics, decisions, owners, dates and next steps, built around your own notes if you wrote any. 10 built-in templates (Standup, One-on-one, Incident review, Customer call and more) plus your own.
 - **Ask anything** about one meeting, a folder, or all meetings. Answers link back to the meetings they came from.
@@ -88,7 +89,7 @@ Then join a call: Waffle notices the call app taking the microphone (Zoom, Teams
 
 | What | Where it goes |
 |---|---|
-| Audio | Recognised in memory on your Mac by [Parakeet](https://huggingface.co/moondream/parakeet-ultra) via [FluidAudio](https://github.com/FluidInference/FluidAudio). The other side's speech is kept in memory until its voices are told apart after the call, then discarded. Never written to disk. |
+| Audio | Recognised in memory on your Mac by [Parakeet](https://huggingface.co/moondream/parakeet-ultra) via [FluidAudio](https://github.com/FluidInference/FluidAudio). The other side's speech is kept in memory until it is read again and its voices are told apart after the call, then discarded. Never written to disk. |
 | Voices | Told apart on your Mac by [LS-EEND](https://huggingface.co/FluidInference/lseend-coreml) live and [pyannote](https://huggingface.co/pyannote/speaker-diarization-community-1) after the call, via FluidAudio. |
 | Calendar | The title and the names of the people invited to the event of a call, kept with that meeting, if you allow the calendar. |
 | Transcripts, notes, summaries | Plain files in `~/Library/Application Support/Waffle`. |

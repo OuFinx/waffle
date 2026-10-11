@@ -381,4 +381,15 @@ let liveVoices = [spoke(1000, "2-1"), spoke(3000, "2-1"), spoke(5000, "@Oleg"), 
 assert(carryVoices(live: liveVoices, turns: [Turn(start: 0, end: 10000, spk: "a"), Turn(start: 20000, end: 30000, spk: "b"), Turn(start: 39000, end: 41000, spk: "c")]) == ["a": "2-1", "b": "2-2"])
 assert(oneOnOne(invited: ["Oleg Petrenko"], voices: ["2-1"]) == ["2-1": "Oleg Petrenko"] && oneOnOne(invited: ["A", "B"], voices: ["2-1"]).isEmpty)
 
+// after the call: a word two passes over the tape agree on goes in, or replaces a live word they both read otherwise; nothing goes out
+func tw(_ s: String, from t: Int) -> [TapeWord] { s.split(separator: " ").enumerated().map { (t + $0.offset * 300, " " + $0.element) } }
+let heardLive = [line(1000, "sys", "I like cats."), line(1500, "mic", "Me too."), line(3000, "sys", "See you.")]
+let both = tw("Well I like big hats. See you then.", from: 700)
+assert(refineText(heardLive, a: both, b: both).map(\.text) == ["Well I like big hats.", "Me too.", "See you then."], "\(refineText(heardLive, a: both, b: both).map(\.text))")
+assert(refineText(heardLive, a: both, b: both).map(\.t) == heardLive.map(\.t))  // times and labels stay
+assert(refineText(heardLive, a: both, b: tw("I like cats. See you.", from: 1000)).map(\.text) == heardLive.map(\.text))  // the second pass does not agree
+assert(refineText(heardLive, a: tw("I like.", from: 1000), b: tw("I like.", from: 1000)).map(\.text) == heardLive.map(\.text))  // fewer words: nothing goes out
+assert(refineText(heardLive, a: [], b: []) == heardLive && refineText([], a: both, b: both).isEmpty)
+assert(tapeWords([(0.2, 0.4, " a"), (6.0, 6.2, " Hel"), (6.2, 6.4, "lo."), (6.5, 6.6, " You")], ClockMap(anchors: []), from: 5.5).map(\.text) == [" Hello.", " You"])
+
 print("ok")
