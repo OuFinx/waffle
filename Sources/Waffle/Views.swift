@@ -1452,6 +1452,8 @@ struct SettingsView: View {
 
             TranscriptSettings()
 
+            SpellingSettings()
+
             ScreenNamesSettings()
 
             AgendaSettings()
@@ -1499,6 +1501,22 @@ struct TranscriptSettings: View {
             Text("Transcript")
         } footer: {
             Text("After the call, Waffle tells the other side's voices apart once more over the whole call, for the lines that got no voice live, then writes the notes; about 10 seconds for an hour. The sound for it stays in memory only and is gone after. Muted in Zoom: what you say is not for the call, so it stays out of the notes (needs Accessibility, see Speaker names).")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Settings: names and terms the transcript should spell right.
+struct SpellingSettings: View {
+    @AppStorage("terms") var terms = ""
+
+    var body: some View {
+        Section {
+            TextField("Names and terms", text: $terms, prompt: Text("Kubernetes, Oleg Petrenko, Waffle"), axis: .vertical).lineLimit(2...6)
+        } header: {
+            Text("Spelling")
+        } footer: {
+            Text("Separated by commas. With the names of the people invited (Calendar), they are checked against what was said and fixed when the sound matches; from the next recording. Latin letters only: names in Cyrillic are left as heard. The first time, Waffle downloads a small extra speech model (about 100 MB).")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

@@ -370,6 +370,20 @@ let gaps = leveled(tone(16000, 0.03) + (0..<32000).map { _ in Float.random(in: -
 assert(peakOf(gaps[24000..<40000]) < 0.05, "\(peakOf(gaps[24000..<40000]))")  // the noise between stays under a quarter of speech
 
 // which app holds the microphone
+assert(spellingTerms(invited: ["Oleg Petrenko", "Jo Ng"], list: "SmartKom, Meeting Recorder\nAurora,,") == ["Aurora", "Meeting Recorder", "Oleg", "Petrenko", "SmartKom"])
+// a term replaces only a near spelling with the same first letter and no everyday word in it (the substitutions FluidAudio made on a meeting)
+for (heard, term) in [("pre segmentation", "presegmentation"), ("Jacobson", "Jakobson"), ("O'Hella", "Ohala"), ("Dallin", "Dalan"), ("smartkom", "SmartKom")] { assert(mayRespell(heard, as: term), heard) }
+for (heard, term) in [("doing", "Boeing"), ("data", "Dalan"), ("meetings", "mappings"), ("representation", "presegmentation"), ("I'm", "IBM"), ("it'll", "Italy"), ("Steve's", "Steve"), ("Dallin", "Collin"), ("channels", "backchannels"), ("running", "Runnel"), ("thing.", "Thilo"), ("multi-band", "multicast"), ("synchronous,", "sychronous")] { assert(!mayRespell(heard, as: term), heard) }
+assert(isCommonWord("stopped") && isCommonWord("studies") && isCommonWord("Data") && !isCommonWord("Jacobson") && !isCommonWord("Ohala"))
+// the second model runs only on passes with something it could fix
+let vocab = ["SmartKom", "Jakobson", "Ohala"]
+assert(worthSpelling("we talked to Jacobson yesterday", vocab) && worthSpelling("the smart kom demo", vocab) && worthSpelling("O'Hella said so", vocab))
+assert(!worthSpelling("we were doing the thing with the data.", vocab) && !worthSpelling("SmartKom works and Ohala agrees", vocab) && !worthSpelling("Олег сказав", vocab))
+// a vocabulary term replaces the token run it was heard in, keeps the run's time and its full stop; the rest stays
+let heard: [Segment] = [(0, 1, " We"), (1, 2, " met"), (2, 3, " Smart"), (3, 4, " com."), (4, 5, " Oh"), (5, 6, " lah"), (6, 7, " said")]
+assert(respell(heard, [(2..<4, "SmartKom"), (4..<6, "Ohala")]).map(\.text) == [" We", " met", " SmartKom.", " Ohala", " said"])
+assert(respell(heard, [(2..<4, "SmartKom")])[2].start == 2 && respell(heard, [(2..<4, "SmartKom")])[2].end == 4 && respell(heard, []).count == 7)
+
 assert(callAppName(bundle: "com.google.Chrome.helper", path: "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper", name: "Google Chrome Helper") == "Google Chrome")
 assert(callAppName(bundle: "com.apple.avconferenced", path: "/usr/libexec/avconferenced", name: nil) == "FaceTime" && callAppName(bundle: "com.apple.WebKit.GPU", path: "", name: nil) == "Safari")
 assert(callAppName(bundle: "com.apple.corespeechd", path: "", name: nil) == nil && callAppName(bundle: "com.superduper.superwhisper", path: "/Applications/superwhisper.app/Contents/MacOS/superwhisper", name: "superwhisper") == nil)

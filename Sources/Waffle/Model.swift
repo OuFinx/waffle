@@ -318,11 +318,15 @@ final class Model: ObservableObject {
         selfName = nil
         guard Engine.downloaded else { status = .done; Store.updateMeta(id, ["recording": false]); showSetup = true; return fail("The speech models are not downloaded yet: finish the setup first") }
         Engine.shared.retain()
+        var invited: [String] = []
         if Agenda.enabled, let e = Agenda.current() {
+            invited = e.invited
             var meta: [String: Any] = ["calendar": ["title": e.title, "invited": e.invited]]
             if Store.title(id) == nil, !e.title.isEmpty { meta["title"] = ["en": e.title] }
             Store.updateMeta(id, meta)
         }
+        let terms = spellingTerms(invited: invited, list: UserDefaults.standard.string(forKey: "terms") ?? "")
+        Task.detached { await Engine.shared.spell(terms) }
         if ScreenNames.enabled {
             let s = ScreenNames()
             s.onLook = { [weak self] in self?.addLook(id, $0) }

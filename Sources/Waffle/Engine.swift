@@ -39,6 +39,7 @@ final class Engine: @unchecked Sendable {
     private var loading: Task<Void, Error>?
     private var users = 0  // recordings that use the models now
     private var unload: DispatchWorkItem?
+    private var spelling: Spelling?
 
     /// The speech model is on this Mac (the first-run setup downloads it).
     static var downloaded: Bool { AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: asrVersion), version: asrVersion) }
@@ -83,7 +84,7 @@ final class Engine: @unchecked Sendable {
         let gone: (Task<Void, Error>, AsrManager?)? = locked {
             guard users == 0, let l = loading else { return nil }
             let a = asr
-            loading = nil; asr = nil; vad = nil
+            loading = nil; asr = nil; vad = nil; spelling = nil
             return (l, a)
         }
         guard let gone else { return }
@@ -150,11 +151,49 @@ final class Engine: @unchecked Sendable {
         var audio = samples
         let least = 16000 / 2  // the model wants at least 0.3 s
         if audio.count < least { audio += quiet(least - audio.count) }
+        let s = locked { spelling }
         return try await exclusive {
             let layers = await a.decoderLayerCount
             var state = try TdtDecoderState(decoderLayers: layers)
             let r = try await a.transcribe(audio, decoderState: &state)
-            return (r.tokenTimings ?? []).map { ($0.startTime, $0.endTime, $0.token) }
+            let timings = r.tokenTimings ?? []
+            var tokens: [Segment] = timings.map { ($0.startTime, $0.endTime, $0.token) }
+            if let s, !timings.isEmpty, worthSpelling(r.text, s.vocabulary.terms.map(\.text)), let spot = try? await s.spotter.spotKeywordsWithLogProbs(audioSamples: audio, customVocabulary: s.vocabulary), !spot.logProbs.isEmpty {
+                let size = ContextBiasingConstants.rescorerConfig(forVocabSize: s.vocabulary.terms.count)
+                let found = s.rescorer.ctcTokenEvaluateCandidates(transcript: r.text, tokenTimings: timings, logProbs: spot.logProbs, frameDuration: spot.frameDuration, cbw: size.cbw, marginSeconds: 0.5, minSimilarity: size.minSimilarity)
+                let fixes = found.candidates.compactMap { c in c.legacyOutcome == .applied && mayRespell(c.basePhrase, as: c.canonicalTerm) ? c.tokenRange.map { ($0, c.canonicalTerm) } : nil }
+                tokens = respell(tokens, fixes)
+            }
+            return tokens
+        }
+    }
+
+    /// Names and terms to spell right in the passes from now on (the people invited, the user's list in Settings); empty for none. Each pass
+    /// then also goes through Parakeet CTC 110M (English, about 100 MB, downloaded on first use), whose sound evidence decides whether a
+    /// word the main model wrote was in fact one of these terms (FluidAudio's vocabulary rescoring), only for passes worthSpelling picks and
+    /// only the replacements mayRespell allows. Off when the terms or that model fail.
+    func spell(_ terms: [String]) async {
+        let words = Array(Set(terms.map { $0.trimmingCharacters(in: .whitespaces) }.filter { $0.count >= 3 })).sorted()
+        if words == locked({ spelling?.terms }) ?? [] { return }
+        guard !words.isEmpty else { locked { spelling = nil }; return }
+        do {
+            let models = try await CtcModels.downloadAndLoad(variant: .ctc110m)
+            let dir = CtcModels.defaultCacheDirectory(for: .ctc110m)
+            let tokenizer = try await CtcTokenizer.load(from: dir)
+            // The CTC model knows English letters only: a term it cannot spell (Cyrillic) would only add noise, so it is left out.
+            let terms = words.compactMap { w -> CustomVocabularyTerm? in
+                let ids = tokenizer.encode(w)
+                return ids.isEmpty || ids.contains { models.vocabulary[$0] == "<unk>" } ? nil : CustomVocabularyTerm(text: w, ctcTokenIds: ids)
+            }
+            guard !terms.isEmpty else { locked { spelling = nil }; return }
+            let vocabulary = CustomVocabularyContext(terms: terms)
+            let spotter = CtcKeywordSpotter(models: models, blankId: models.vocabulary.count)
+            let rescorer = try await VocabularyRescorer.create(spotter: spotter, vocabulary: vocabulary, ctcModelDirectory: dir)
+            locked { spelling = Spelling(terms: words, vocabulary: vocabulary, spotter: spotter, rescorer: rescorer) }
+            log.info("spelling \(terms.count) terms")
+        } catch {
+            log.error("spelling off: \(error.localizedDescription)")
+            locked { spelling = nil }
         }
     }
 
@@ -181,6 +220,14 @@ final class Engine: @unchecked Sendable {
             return (Double(s.startTimeSeconds), Double(s.endTimeSeconds), ids[s.speakerId]!)
         }
     }
+}
+
+/// The vocabulary model's check, ready for the passes.
+struct Spelling {
+    let terms: [String]
+    let vocabulary: CustomVocabularyContext
+    let spotter: CtcKeywordSpotter
+    let rescorer: VocabularyRescorer
 }
 
 /// Room-quiet noise, not digital silence: exact zeros throw off the speaker models' normalisation (FluidAudio #981).
