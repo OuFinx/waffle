@@ -46,6 +46,7 @@ final class Recorder {
     private var micIn: AsyncStream<Piece>.Continuation!, sysIn: AsyncStream<Piece>.Continuation!
     private var micLoop: Task<Void, Never>?, sysLoop: Task<Void, Never>?
     private let micCapture = MicCapture()
+    private let micWatch = Locked(MicWatch())
     private let micResample = Resampler(), sysResample = Resampler()
     private let sysQueue = DispatchQueue(label: "system audio")  // starts, stops and restarts of the system audio, one at a time
     private var tap: SystemTap?
@@ -123,7 +124,7 @@ final class Recorder {
         timer?.cancel()
         unlisten()
         micCapture.stop()
-        sysQueue.sync { tap?.stop(); tap = nil; screen?.stop(); screen = nil }
+        sysQueue.async { [self] in tap?.stop(); tap = nil; screen?.stop(); screen = nil }  // not sync: a Core Audio call that hangs must not hold up quitting
     }
 
     private func teardown() async -> Tapes {
@@ -143,6 +144,10 @@ final class Recorder {
         if SystemAudioPermission.status != .denied {
             let t = SystemTap()
             t.onAudio = { [weak self] in self?.sysAudio($0, $1) }
+            t.onWrongRate = { [weak self] in
+                log.error("process tap delivers at another rate than its format says: rebuilding it")
+                self?.restartSystem()
+            }
             do {
                 try t.start()
                 tap = t
@@ -166,13 +171,10 @@ final class Recorder {
     private func sysAudio(_ buf: AVAudioPCMBuffer, _ host: UInt64?) {
         guard let x = sysResample.convert(buf) else { return }
         let ms = wallMs(host)
-        let first = flags.withLock { f -> Bool in
+        flags.withLock { f in
             f.lastSys = ms + Double(x.count) / 16
-            if f.sysHeard || !x.contains(where: { $0 != 0 }) { return false }
-            f.sysHeard = true
-            return true
+            if !f.sysHeard && x.contains(where: { $0 != 0 }) { f.sysHeard = true }
         }
-        if first { sysQueue.async { self.sysRetries = 0 } }  // it works: the next failure starts the backoff afresh
         sysIn.yield(Piece(samples: x, ms: ms))
     }
 
@@ -220,11 +222,22 @@ final class Recorder {
         let (m, s) = flags.withLock { ($0.lastMic, $0.lastSys) }
         // No audio captured for 0.7 s (screen capture sends none while nothing plays; a muted mic sends none): finish the window.
         Task { if now - m > 700 { await mic.idle() }; if now - s > 700 { await sys.idle() } }
-        if micOn, micCapture.running, micCapture.silentFor > 3 {
-            log.error("microphone delivered nothing for 3 s: restarting it")
-            micCapture.restart(after: 0, devicesChanged: true)
+        let stuck = micCapture.stuckFor
+        if stuck > 5 {  // an engine call hangs: no restarts pile up behind it, the user is told
+            if stuck < 5.5 { log.error("microphone: an engine call hangs for 5 s") }
+            error("The microphone does not respond (a device went away?): your side is not transcribed until it does")
+        } else if micOn, micCapture.running {
+            switch micWatch.withLock({ $0.check(now: now / 1000, sinceAudio: micCapture.silentFor, sinceSound: micCapture.soundlessFor) }) {
+            case .restart:
+                log.error("microphone delivered nothing for 3 s: restarting it")
+                micCapture.restart(after: 0, devicesChanged: true)
+            case .giveUp: error("The microphone stopped sending audio: plug it in again or pick another one")
+            case .muted: error("Your microphone sends only silence: is it muted?")
+            case .wait: break
+            }
         }
         sysQueue.async { [self] in
+            if Date().timeIntervalSince(sysStarted) > 30, tap != nil || screen != nil { sysRetries = 0 }  // it works: the next failure starts the backoff afresh
             guard let t = tap else { return }
             if t.silentFor > 3 {
                 log.error("process tap delivered nothing for 3 s: restarting it")
@@ -243,6 +256,7 @@ final class Recorder {
     private func listen() {
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self, !self.isStopped else { return }
+            self.micWatch.withLock { $0 = MicWatch() }  // a microphone given up on may work now
             self.micCapture.restart(after: 0.4, devicesChanged: true)
             self.restartSystem(after: 0.4)
         }
@@ -254,6 +268,7 @@ final class Recorder {
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: nil) { [weak self] _ in
             guard let self, !self.isStopped else { return }
             log.info("woke up: restarting capture")
+            self.micWatch.withLock { $0 = MicWatch() }
             self.micCapture.restart(after: 1, devicesChanged: true)
             self.restartSystem(after: 1)
         })
@@ -530,44 +545,71 @@ actor Source {
 /// The microphone through a fresh AVAudioEngine each time the devices change: a reused engine can stay "running" on a device that is
 /// gone and capture nothing. Apple's voice processing cancels what the speakers play (measured at 70% volume: 71% of the played words
 /// reached the mic without it, 15% with it), unless the sound goes to headphones, where there is no echo and it only dulls the voice.
+/// Every engine call runs on `q` and may never return: AVAudioEngine.inputNode can hang for hours when a Bluetooth device goes away. So
+/// nothing ever waits on `q`; each build carries a generation, a newer request or a stop makes an older build's late result void, and
+/// stuckFor tells the watchdog that a build hangs.
 final class MicCapture {
     var onAudio: (AVAudioPCMBuffer, UInt64?) -> Void = { _, _ in }
     var onError: (String) -> Void = { _ in }
     private let q = DispatchQueue(label: "mic")
+    // Only on q:
     private var engine: AVAudioEngine?
     private var observer: NSObjectProtocol?
-    private var gen = 0
-    private var stopped = false
     private var noVoiceProcessing = false  // it failed on this pair of devices: the plain mic until the devices change
-    private let last = Locked(Date())
+    // From any thread:
+    private let state = Locked(State())
+    private struct State { var gen = 0; var stopped = false; var busySince: Date? }
+    private let last = Locked(Date()), lastSound = Locked(Date())
     private let phones = Locked(false)
 
-    /// Seconds since the last audio.
+    /// Seconds since the last audio, and since the last audio that was not mostly exact zeros.
     var silentFor: TimeInterval { Date().timeIntervalSince(last.withLock { $0 }) }
+    var soundlessFor: TimeInterval { Date().timeIntervalSince(lastSound.withLock { $0 }) }
+    /// Seconds the work on `q` has been going (0: none): long means an engine call hangs.
+    var stuckFor: TimeInterval { state.withLock { $0.busySince.map { Date().timeIntervalSince($0) } ?? 0 } }
     /// Started and not given up (no microphone found): the watchdog may restart it.
     var running: Bool { live.withLock { $0 } }
     private let live = Locked(false)
     /// The sound goes to headphones (see headphonesInUse).
     var headphones: Bool { phones.withLock { $0 } }
 
-    func start() { q.async { self.last.withLock { $0 = Date() }; self.live.withLock { $0 = true }; self.build() } }
+    func start() { live.withLock { $0 = true }; restart(after: 0) }
 
     /// Build the engine again after `after` seconds; calls in between count once.
     func restart(after: Double = 0.3, devicesChanged: Bool = false) {
-        q.async { [self] in
-            gen += 1
-            let g = gen
-            last.withLock { $0 = Date() }
-            q.asyncAfter(deadline: .now() + after) { [self] in
-                guard g == gen, !stopped else { return }
-                if devicesChanged { noVoiceProcessing = false }
-                teardown()
-                build()
-            }
+        let g = state.withLock { s -> Int? in
+            guard !s.stopped else { return nil }
+            s.gen += 1
+            return s.gen
+        }
+        guard let g else { return }
+        let now = Date()
+        last.withLock { $0 = now }; lastSound.withLock { $0 = now }
+        run(g, after: after) { [self] in
+            if devicesChanged { noVoiceProcessing = false }
+            teardown()
+            build(g)
         }
     }
 
-    func stop() { q.sync { stopped = true; gen += 1; live.withLock { $0 = false }; teardown() } }
+    /// Never waits: a hanging build must not hold up ending the meeting or quitting. The engine goes once `q` is free.
+    func stop() {
+        state.withLock { $0.stopped = true; $0.gen += 1 }
+        live.withLock { $0 = false }
+        q.async { [self] in teardown() }
+    }
+
+    private func current(_ g: Int) -> Bool { state.withLock { $0.gen == g } }
+
+    /// Work for generation `g` on `q`, skipped if a newer request or a stop came while it waited (behind a hanging build, say).
+    private func run(_ g: Int, after: Double, _ work: @escaping () -> Void) {
+        q.asyncAfter(deadline: .now() + after) { [self] in
+            guard current(g) else { return }
+            state.withLock { $0.busySince = Date() }
+            defer { state.withLock { $0.busySince = nil } }
+            work()
+        }
+    }
 
     private func teardown() {
         if let o = observer { NotificationCenter.default.removeObserver(o); observer = nil }
@@ -575,10 +617,10 @@ final class MicCapture {
         engine = nil
     }
 
-    private func build(tries: Int = 0) {
-        guard !stopped else { return }
+    private func build(_ g: Int, tries: Int = 0) {
         let e = AVAudioEngine()
-        let input = e.inputNode
+        let input = e.inputNode  // where it hangs, if it does
+        guard current(g) else { return }  // it came back after a newer request or a stop: its result is void
         let hp = headphonesInUse()
         phones.withLock { $0 = hp }
         let vp = !noVoiceProcessing && !hp
@@ -589,25 +631,29 @@ final class MicCapture {
         }
         let fmt = input.outputFormat(forBus: 0)
         guard fmt.sampleRate > 0, fmt.channelCount > 0 else {  // a device is coming or going: look again in a moment
-            if tries < 10 { q.asyncAfter(deadline: .now() + 1) { [weak self] in self?.build(tries: tries + 1) } } else { live.withLock { $0 = false }; onError("No microphone found") }
+            if tries < 10 { run(g, after: 1) { [weak self] in self?.build(g, tries: tries + 1) } } else { live.withLock { $0 = false }; onError("No microphone found") }
             return
         }
         input.installTap(onBus: 0, bufferSize: 4096, format: fmt) { [weak self] buf, when in
-            guard let self else { return }
-            self.last.withLock { $0 = Date() }
-            self.onAudio(oneChannel(buf), when.isHostTimeValid ? when.hostTime : nil)
+            guard let self, self.current(g) else { return }
+            let one = oneChannel(buf), now = Date()
+            self.last.withLock { $0 = now }
+            if let d = one.floatChannelData, !mostlyZeros(UnsafeBufferPointer(start: d[0], count: Int(one.frameLength))) { self.lastSound.withLock { $0 = now } }
+            self.onAudio(one, when.isHostTimeValid ? when.hostTime : nil)
         }
         observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: e, queue: nil) { [weak self] _ in self?.restart() }
         engine = e
         do {
             try e.start()
+            guard current(g) else { return teardown() }  // a newer request or a stop came while it started
+            live.withLock { $0 = true }  // back, also after "No microphone found"
             log.info("microphone: \(fmt.sampleRate) Hz, \(fmt.channelCount) ch, voice processing \(vp), headphones \(hp)")
         } catch {
             log.error("microphone start: \(error.localizedDescription, privacy: .public)")
             teardown()
             if vp {
                 noVoiceProcessing = true  // e.g. AirPods mic with the Mac's speakers: voice processing can not pair them
-                build(tries: tries)
+                build(g, tries: tries)
             } else {
                 onError("Microphone: \(error.localizedDescription)")
             }
@@ -688,14 +734,17 @@ enum SystemAudioPermission {
 
 /// Everything the Mac plays except Waffle's own sound, through a Core Audio process tap (macOS 14.2+) in a private aggregate device. It
 /// needs only System Audio Recording (no screen recording, no purple indicator, no monthly question) and carries the audio's own
-/// timestamps. Bound to the output devices there are when it starts: the Recorder rebuilds it when the output changes.
+/// timestamps. Bound to the output devices there are when it starts: the Recorder rebuilds it when the output changes, and when the
+/// rate it delivers is not the one its format said (onWrongRate: the device changed its rate in place, see RateCheck).
 final class SystemTap {
     var onAudio: (AVAudioPCMBuffer, UInt64?) -> Void = { _, _ in }
+    var onWrongRate: () -> Void = {}
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
     private let q = DispatchQueue(label: "tap", qos: .userInitiated)
     private let last = Locked(Date())
+    private var rate = RateCheck(rate: 0)  // only on q
 
     var silentFor: TimeInterval { Date().timeIntervalSince(last.withLock { $0 }) }
 
@@ -730,6 +779,7 @@ final class SystemTap {
         addr = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyFormat, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         err = AudioObjectGetPropertyData(tapID, &addr, 0, nil, &size, &asbd)
         guard err == noErr, asbd.mSampleRate > 0, let format = AVAudioFormat(streamDescription: &asbd) else { throw fail("The system audio has no format", err) }
+        rate = RateCheck(rate: asbd.mSampleRate)
 
         err = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, q) { [weak self] _, input, inputTime, _, _ in
             self?.deliver(input, inputTime.pointee, format)
@@ -756,7 +806,9 @@ final class SystemTap {
             dst[i].mDataByteSize = UInt32(n)
         }
         last.withLock { $0 = Date() }
-        onAudio(buf, time.mFlags.contains(.hostTimeValid) ? time.mHostTime : nil)
+        let host = time.mFlags.contains(.hostTimeValid) ? time.mHostTime : nil
+        if let host, rate.add(Int(frames), at: Double(AudioConvertHostTimeToNanos(host)) / 1e9) { onWrongRate() }
+        onAudio(buf, host)
     }
 
     func stop() {
