@@ -78,6 +78,7 @@ try await run(w.flush())
 emit(try await Engine.shared.exclusive { () throws -> [Nemotron3ChunkResult] in diarizer.appendAudio(diarPending); return try diarizer.finishStream() })
 let liveTime = Date().timeIntervalSince(started)
 lines = lines.map { var l = $0; l.final = true; return l }
+let whole = lines  // before splitting at voice changes, to compare offline
 lines = splitAtVoices(lines, turns)
 let live = labelSpeakers(lines, turns)  // Model.labelled, no call window
 
@@ -97,6 +98,6 @@ let polishTime = Date().timeIntervalSince(t2)
 try write(["audio": Double(audio.count) / 16000, "liveTime": liveTime, "asrTime": asrTime, "vadTime": vadTime, "diarTime": diarTime, "passes": passes, "thinRetries": thinRetries,
            "tape": tape.seconds, "liveVoices": Set(live.compactMap(\.spk)).count, "offVoices": Set(offTurns.map(\.spk)).count, "polishUsed": use, "polishTime": polishTime,
            "lines": zip(live, polished).map { a, b in ["t": (Double(a.t) - base) / 1000, "w": (Double(a.w ?? 0) - base) / 1000, "text": a.text, "live": a.spk ?? "", "polish": b.spk ?? ""] as [String: Any] },
-           "turns": turns.map { [(Double($0.start) - base) / 1000, (Double($0.end) - base) / 1000, $0.spk] as [Any] }, "nspk": nspk, "probs": probs.map { (Double($0) * 100).rounded() / 100 },
+           "turns": turns.map { [(Double($0.start) - base) / 1000, (Double($0.end) - base) / 1000, $0.spk] as [Any] }, "whole": whole.map { ["t": (Double($0.t) - base) / 1000, "w": (Double($0.w ?? 0) - base) / 1000, "text": $0.text] as [String: Any] }, "nspk": nspk, "probs": probs.map { (Double($0) * 100).rounded() / 100 },
            "windows": windows.sorted { $0.key < $1.key }.map { ["w": (Double($0.key) - base) / 1000, "tokens": $0.value.map { [$0.start, $0.end, $0.text] as [Any] }] as [String: Any] }])
 print(String(format: "done in %.0f s", liveTime))
