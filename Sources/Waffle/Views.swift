@@ -1474,6 +1474,7 @@ struct SettingsView: View {
 struct TranscriptSettings: View {
     @State var voices = Model.tellVoicesApart
     @State var polish = Model.polishEnabled
+    @State var remember = Model.rememberVoices
     @State var followMute = Model.followCallMute
     @State var audio = SystemAudioPermission.status
 
@@ -1483,6 +1484,16 @@ struct TranscriptSettings: View {
                 .help("Off: everyone on the call is \"Them\". On: Speaker 1, Speaker 2 or names from the call window, which can be wrong. From the next recording.")
             if voices {
                 Toggle("Tell the voices apart again after the call", isOn: $polish).onChange(of: polish) { Model.polishEnabled = polish }
+                if polish {
+                    HStack {
+                        Toggle("Remember the voices I name", isOn: $remember).onChange(of: remember) { Model.rememberVoices = remember }
+                            .help("A voice you name is recognised in later meetings and gets that name. Waffle keeps a voice print on this Mac, never the audio. From the next recording.")
+                        Spacer()
+                        Button("Forget Voices") {
+                            if confirm("Forget all voices?", "Waffle deletes the voice prints of the people you named and of every meeting. Names already in transcripts stay.", "Forget Voices") { Store.forgetVoices() }
+                        }
+                    }
+                }
             }
             Toggle("Skip what I say while muted in Zoom or Teams", isOn: $followMute).onChange(of: followMute) { Model.followCallMute = followMute }
             HStack {

@@ -1271,6 +1271,37 @@ func carryVoices(live: [Line], turns: [Turn]) -> [String: String] {
     return won.filter { o, w in !won.contains { $0.key != o && $0.value.spk == w.spk && ($0.value.n > w.n || ($0.value.n == w.n && $0.key < o)) } }.mapValues(\.spk)
 }
 
+// MARK: known voices: a voice the user named once, told in later meetings (Settings, off unless turned on)
+
+/// Seconds a voice must speak in a meeting before its print is kept: shorter ones are too noisy to learn from or to match.
+let voiceLeast = 20.0
+
+/// Names for this meeting's voices from the prints of the voices the user named before: a voice gets a name when it sounds like that
+/// person (cosine similarity at least `least`), clearly more than like anyone else (by `margin`), and more than any other voice of the
+/// meeting does. Otherwise it stays unnamed: a wrong name is worse than none. Tools/bench/voices.py measures this (keep the two the same):
+/// on 14 ICSI meetings, 0.75 and 0.2 named no voice wrong (0.70 named 3 to 4% wrong after Opus) and about three in four of the known ones right.
+func knownVoices(_ prints: [String: [Float]], _ known: [String: [Float]], least: Float = 0.75, margin: Float = 0.2) -> [String: String] {
+    func cos(_ a: [Float], _ b: [Float]) -> Float {
+        let d = zip(a, b).map { $0 * $1 }.reduce(0, +), n = (a.map { $0 * $0 }.reduce(0, +) * b.map { $0 * $0 }.reduce(0, +)).squareRoot()
+        return n > 0 ? d / n : 0
+    }
+    var best: [String: (name: String, score: Float)] = [:]
+    for (v, p) in prints {
+        let s = known.map { (name: $0.key, score: cos(p, $0.value)) }.sorted { $0.score > $1.score }
+        guard let top = s.first, top.score >= least, s.count == 1 || top.score - s[1].score >= margin else { continue }
+        best[v] = top
+    }
+    return best.filter { v, b in !best.contains { $0.key != v && $0.value.name == b.name && ($0.value.score > b.score || ($0.value.score == b.score && $0.key < v)) } }.mapValues(\.name)
+}
+
+/// A known voice's print with one more meeting of that voice: the running average, at unit length.
+func addPrint(_ old: (print: [Float], n: Int)?, _ new: [Float]) -> (print: [Float], n: Int) {
+    let unit = { (v: [Float]) -> [Float] in let n = v.map { $0 * $0 }.reduce(0, +).squareRoot(); return n > 0 ? v.map { $0 / n } : v }
+    guard let old, old.print.count == new.count else { return (unit(new), 1) }
+    let n = Float(old.n)
+    return (unit(zip(old.print, unit(new)).map { ($0 * n + $1) / (n + 1) }), old.n + 1)
+}
+
 /// A call with one other person on the invite and one voice on the other side: that voice is that person.
 func oneOnOne(invited: [String], voices: [String]) -> [String: String] {
     invited.count == 1 && voices.count == 1 ? [voices[0]: invited[0]] : [:]

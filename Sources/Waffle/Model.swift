@@ -407,6 +407,13 @@ final class Model: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "polish") }
     }
 
+    /// Settings: a voice the user names is remembered (its print, never audio) and named in later meetings. Off unless turned on: a
+    /// voice print is biometric data.
+    static var rememberVoices: Bool {
+        get { UserDefaults.standard.bool(forKey: "rememberVoices") }
+        set { UserDefaults.standard.set(newValue, forKey: "rememberVoices") }
+    }
+
     /// Keeps what the call window showed with the meeting: names for the voices it settled (where none was given), and who was in
     /// the call, for the summary.
     private func saveScreenNames(_ id: String) {
@@ -436,6 +443,7 @@ final class Model: ObservableObject {
         let active = activeId == id
         let old = speakerNames(active ? lines : Store.lines(id), names: active ? live.names : Store.speakers(id))[spk]
         Store.nameSpeaker(id, spk, name)
+        if Model.rememberVoices { Store.learnVoice(id, spk, name) }
         let new = name.trimmingCharacters(in: .whitespaces)
         if let old, !new.isEmpty, old != new {
             if active { renamed[old] = new }
@@ -484,12 +492,22 @@ final class Model: ObservableObject {
         Task.detached(priority: .userInitiated) { [self] in
             let started = Date()
             let most = max(people, invited.count) > 0 ? max(people, invited.count) + 1 : nil
-            let segs = (try? await Engine.shared.diarize(tape.floats, maxSpeakers: most)) ?? []
-            let turns = segs.map { Turn(start: Int(tape.clock.ms(Int($0.start * 16000))), end: Int(tape.clock.ms(Int($0.end * 16000))), spk: $0.spk) }
+            let found = try? await Engine.shared.diarize(tape.floats, maxSpeakers: most)
+            let turns = (found?.turns ?? []).map { Turn(start: Int(tape.clock.ms(Int($0.start * 16000))), end: Int(tape.clock.ms(Int($0.end * 16000))), spk: $0.spk) }
             let use = !turns.isEmpty && live.contains { $0.src == "sys" && $0.spk == nil }
             var relabeled = live
+            let carried = carryVoices(live: live, turns: turns)
+            // Known voices: each transcript voice's print (from the longest voice after the call that is it), only for voices that spoke long enough.
+            var prints: [String: (print: [Float], s: Double)] = [:]
+            if Model.rememberVoices {
+                var spoke: [String: Double] = [:]
+                for t in turns { spoke[t.spk, default: 0] += Double(t.end - t.start) / 1000 }
+                for (o, p) in found?.prints ?? [:] where spoke[o, default: 0] >= voiceLeast {
+                    let spk = carried[o] ?? "\(part)-\(o)"
+                    if spoke[o]! > prints[spk]?.s ?? 0 { prints[spk] = (p, spoke[o]!) }
+                }
+            }
             if use {
-                let carried = carryVoices(live: live, turns: turns)
                 relabeled = labelFromScreen(labelSpeakers(live, turns.map { Turn(start: $0.start, end: $0.end, spk: carried[$0.spk] ?? "\(part)-\($0.spk)") }), talking, names: names)
                 // Only lines the live voices missed (the speaker model still loading, a gap): on 16 real meetings the live voices were
                 // right more often than the whole-call ones (94% of lines against 89%), which moved lines that were right.
@@ -504,6 +522,13 @@ final class Model: ObservableObject {
                         var x = l; x.spk = spk; return x
                     }
                     Store.saveLines(id, lines)
+                }
+                if !prints.isEmpty, activeId == id {
+                    Store.updateMeta(id, ["prints": Store.prints(id).merging(prints.mapValues(\.print)) { $1 }])
+                    // Only voices of the transcript without a name, and only names no voice of this meeting has yet.
+                    let voices = Set(lines.filter { $0.part == part && $0.src == "sys" }.compactMap(\.spk)), given = Store.speakers(id)
+                    let unnamed = prints.filter { voices.contains($0.key) && given[$0.key] == nil }.mapValues(\.print)
+                    for (spk, name) in knownVoices(unnamed, Store.voices.mapValues(\.print)) where !given.values.contains(name) { Store.nameSpeaker(id, spk, name) }
                 }
                 wrapUp(id)
             }
