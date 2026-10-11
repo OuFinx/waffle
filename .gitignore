@@ -5,3 +5,4 @@ models/
 HANDOFF.md
 docs/superpowers/
 Tools/bench/.build/
+.claude/worktrees/
