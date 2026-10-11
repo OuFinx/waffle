@@ -48,7 +48,7 @@ for k in 0..<120 {
     long = replaceWindow(long, src: src, w: w, part: 1, final: true, segments: [(0, 2, text)])
     full = dropEcho((full + [Line(t: w, src: src, text: text, part: 1, final: true, w: w)]).sorted { $0.t < $1.t })
 }
-assert(long == full && long.count == 90, "\(long.count) \(full.count)")
+assert(long.map { var l = $0; l.words = nil; return l } == full && long.count == 90, "\(long.count) \(full.count)")
 assert(firstIndex(5) { $0 >= 3 } == 3 && firstIndex(5) { _ in false } == 5 && firstIndex(0) { _ in true } == 0)
 
 // a summary prompt is the fixed rules, the template, then the fixed title / folders / speakers layout
@@ -90,6 +90,14 @@ assert(labelled.map(\.spk) == ["1-1", nil, "1-2", nil], "\(labelled.map(\.spk))"
 // the same with turns out of order, and with a long turn that started well before the line
 assert(labelSpeakers(talk, turns.reversed()).map(\.spk) == labelled.map(\.spk))
 assert(labelSpeakers(talk, [Turn(start: -50000, end: 1000, spk: "1-3"), Turn(start: 5500, end: 6000, spk: "1-1")]).map(\.spk) == ["1-3", nil, "1-1", nil])
+// a line splits where another voice takes over for good, not at a short "yeah" by another voice; word times come from the recognizer
+let said = replaceWindow([], src: "sys", w: 10000, part: 1, final: true, segments: [(0, 2.4, " So we ship it on Monday then"), (2.6, 4.6, " yes and I will write the notes.")])
+assert(said.count == 1 && said[0].words?.count == 14 && said[0].words![0] < 10200 && said[0].words![7] > 12500, "\(said)")
+let handover = [Turn(start: 10000, end: 12500, spk: "1-1"), Turn(start: 12500, end: 15000, spk: "1-2")]
+let parts = labelSpeakers(splitAtVoices(said, handover), handover)
+assert(parts.map(\.text) == ["So we ship it on Monday then", "yes and I will write the notes."] && parts.map(\.spk) == ["1-1", "1-2"] && parts[1].t == said[0].words![7], "\(parts)")
+assert(splitAtVoices(said, [Turn(start: 10000, end: 15000, spk: "1-1"), Turn(start: 13000, end: 13600, spk: "1-2")]) == said)  // a short other voice
+assert(try! JSONDecoder().decode(Line.self, from: JSONEncoder().encode(said[0])).words == nil)  // word times are not saved
 let names = speakerNames(labelled, names: ["1-2": "Oleg"])
 assert(names == ["1-1": "Speaker 1", "1-2": "Oleg"] && labelled.map { label($0, names) } == ["Speaker 1", "Me", "Oleg", "Them"])
 assert(speakerNames(Array(labelled.prefix(2)), names: [:]) == ["1-1": "Them"])  // one voice only: plain "Them"

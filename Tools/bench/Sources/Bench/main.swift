@@ -78,6 +78,7 @@ try await run(w.flush())
 emit(try await Engine.shared.exclusive { () throws -> [Nemotron3ChunkResult] in diarizer.appendAudio(diarPending); return try diarizer.finishStream() })
 let liveTime = Date().timeIntervalSince(started)
 lines = lines.map { var l = $0; l.final = true; return l }
+lines = splitAtVoices(lines, turns)
 let live = labelSpeakers(lines, turns)  // Model.labelled, no call window
 
 // Model.polish, no calendar and no call window
