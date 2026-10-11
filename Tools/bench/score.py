@@ -32,6 +32,25 @@ for k, l in enumerate(L):
     truth.append(o.most_common(1)[0][0] if o else None)
 spks = sorted({r[2] for r in ref})
 print("true lines per speaker:", dict(collections.Counter(t for t in truth if t)))
+# word-level: each reference word goes to the line whose recognized words (token times) hold its middle, a fairer truth than [t, next t)
+words = []
+if "windows" in out:
+    toks = {round(x["w"], 3): [x["w"] + a for a, b, _ in x["tokens"]] for x in out["windows"]}
+    ends = {round(x["w"], 3): [x["w"] + b for a, b, _ in x["tokens"]] for x in out["windows"]}
+    span = []
+    for k, l in enumerate(L):
+        w = round(l["w"], 3); nxt = min([m["t"] for m in L if round(m["w"], 3) == w and m["t"] > l["t"]], default=1e9)
+        e = max([b for a, b in zip(toks.get(w, []), ends.get(w, [])) if l["t"] - 0.02 <= a < nxt - 0.02], default=l["t"] + 0.5)
+        span.append((l["t"] - 0.15, e + 0.15))
+    for a, b, spk, _ in ref:
+        mid = (a + b) / 2
+        c = [k for k, (s, e) in enumerate(span) if s <= mid <= e]
+        if c: words.append((min(c, key=lambda k: abs(sum(span[k]) / 2 - mid)), spk))
+for key in ("live", "polish"):
+    if words:
+        m = collections.Counter((L[k][key], spk) for k, spk in words); labels = sorted({L[k][key] for k, _ in words})
+        best = max(sum(m[(lab, s)] for lab, s in zip(perm, spks) if lab) for perm in itertools.permutations(labels + [None] * max(0, len(spks) - len(labels)), len(spks)))
+        print(f"[{key}] words with the right voice {best / len(words) * 100:.1f}% of {len(words)} reference words in lines")
 for key in ("live", "polish"):
     pairs = [(l[key], t) for l, t in zip(L, truth) if t]
     labels = sorted({p[0] for p in pairs})

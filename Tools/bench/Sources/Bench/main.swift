@@ -27,11 +27,12 @@ let w = Windower()
 var vad: VadStreamState?, speaking = false, level = VoiceLevel(most: 20), tape = Tape(), lines: [Line] = [], turns: [Turn] = []
 var asrTime = 0.0, vadTime = 0.0, diarTime = 0.0, passes = 0, thinRetries = 0, frames = 0
 let diarizer = Nemotron3Diarizer(config: .fast32, models: try await Nemotron3Models.loadFromHuggingFace(config: .fast32))
-var diarPending: [Float] = []
+var diarPending: [Float] = [], probs: [Float] = [], nspk = 0, windows: [Int: [Segment]] = [:]  // raw diarizer output and each window's last words, for replaying labels offline
 
 func emit(_ chunks: [Nemotron3ChunkResult]) {
     for c in chunks {
         let at = Double(frames) / 100
+        probs += c.probabilities.prefix(c.frameCount * c.numSpeakers); nspk = c.numSpeakers
         for s in Nemotron3Diarizer.segments(probabilities: c.probabilities, frameCount: c.frameCount, numSpeakers: c.numSpeakers) {
             turns.append(Turn(start: Int(ms(Int((at + Double(s.startSeconds)) * 16000))), end: Int(ms(Int((at + Double(s.endSeconds)) * 16000))), spk: "1-\(s.speakerIndex + 1)"))
         }
@@ -47,7 +48,7 @@ func run(_ ps: [Pass]) async throws {
             if w.words(p.bare, bare) > Int(Double(w.words(p, tokens)) * 1.3) { pass = p.bare; tokens = bare; w.forgetContext(p); thinRetries += 1 }
         }
         asrTime += Date().timeIntervalSince(t0); passes += 1
-        for e in w.done(pass, tokens) { lines = replaceWindow(lines, src: "sys", w: Int(ms(e.start)), part: 1, final: e.final, segments: e.segments) }
+        for e in w.done(pass, tokens) { windows[Int(ms(e.start))] = e.segments; lines = replaceWindow(lines, src: "sys", w: Int(ms(e.start)), part: 1, final: e.final, segments: e.segments) }
     }
 }
 let started = Date()
@@ -94,5 +95,7 @@ let polishTime = Date().timeIntervalSince(t2)
 
 try write(["audio": Double(audio.count) / 16000, "liveTime": liveTime, "asrTime": asrTime, "vadTime": vadTime, "diarTime": diarTime, "passes": passes, "thinRetries": thinRetries,
            "tape": tape.seconds, "liveVoices": Set(live.compactMap(\.spk)).count, "offVoices": Set(offTurns.map(\.spk)).count, "polishUsed": use, "polishTime": polishTime,
-           "lines": zip(live, polished).map { a, b in ["t": (Double(a.t) - base) / 1000, "text": a.text, "live": a.spk ?? "", "polish": b.spk ?? ""] as [String: Any] }])
+           "lines": zip(live, polished).map { a, b in ["t": (Double(a.t) - base) / 1000, "w": (Double(a.w ?? 0) - base) / 1000, "text": a.text, "live": a.spk ?? "", "polish": b.spk ?? ""] as [String: Any] },
+           "turns": turns.map { [(Double($0.start) - base) / 1000, (Double($0.end) - base) / 1000, $0.spk] as [Any] }, "nspk": nspk, "probs": probs.map { (Double($0) * 100).rounded() / 100 },
+           "windows": windows.sorted { $0.key < $1.key }.map { ["w": (Double($0.key) - base) / 1000, "tokens": $0.value.map { [$0.start, $0.end, $0.text] as [Any] }] as [String: Any] }])
 print(String(format: "done in %.0f s", liveTime))
