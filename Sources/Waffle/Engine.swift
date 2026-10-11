@@ -164,17 +164,20 @@ final class Engine: @unchecked Sendable {
                 let fixes = found.candidates.compactMap { c in c.legacyOutcome == .applied && mayRespell(c.basePhrase, as: c.canonicalTerm) ? c.tokenRange.map { ($0, c.canonicalTerm) } : nil }
                 tokens = respell(tokens, fixes)
             }
-            return tokens
+            return dropUnknown(tokens)
         }
     }
 
     /// Names and terms to spell right in the passes from now on (the people invited, the user's list in Settings); empty for none. Each pass
     /// then also goes through Parakeet CTC 110M (English, about 100 MB, downloaded on first use), whose sound evidence decides whether a
     /// word the main model wrote was in fact one of these terms (FluidAudio's vocabulary rescoring), only for passes worthSpelling picks and
-    /// only the replacements mayRespell allows. Off when the terms or that model fail.
     /// The terms spelled now, for the pass after the call to leave alone.
     var spelled: [String] { locked { spelling?.terms } ?? [] }
 
+    /// Names and terms to spell right in the passes from now on (the people invited, the user's list in Settings); empty for none. Each pass
+    /// then also goes through Parakeet CTC 110M (English, about 100 MB, downloaded on first use), whose sound evidence decides whether a
+    /// word the main model wrote was in fact one of these terms (FluidAudio's vocabulary rescoring), only for passes worthSpelling picks and
+    /// only the replacements mayRespell allows. Off when the terms or that model fail.
     func spell(_ terms: [String]) async {
         let words = Array(Set(terms.map { $0.trimmingCharacters(in: .whitespaces) }.filter { $0.count >= 3 })).sorted()
         if words == locked({ spelling?.terms }) ?? [] { return }

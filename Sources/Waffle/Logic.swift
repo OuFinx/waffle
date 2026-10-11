@@ -1250,6 +1250,21 @@ func speechLevel(_ x: [Float]) -> Float {
 }
 
 /// The words of recognizer tokens, lowercased without punctuation, with when each starts and the index after its last token.
+/// Parakeet writes what it has no token for as "<unk>": in Ukrainian the quotes « » and the dash ("підприємства <unk>Універсал<unk>",
+/// "по дорогах <unk> це 223 мільйона"), about once a minute in council meetings. Those go; a word glued to one keeps the space before it.
+func dropUnknown(_ tokens: [Segment]) -> [Segment] {
+    var out: [Segment] = [], space = false
+    for var t in tokens {
+        let spaced = t.text.hasPrefix(" ")
+        t.text = t.text.replacingOccurrences(of: "<unk>", with: "")
+        if t.text.trimmingCharacters(in: .whitespaces).isEmpty { space = space || spaced; continue }
+        if space, !t.text.hasPrefix(" ") { t.text = " " + t.text }
+        space = false
+        out.append(t)
+    }
+    return out
+}
+
 func wordSpans(_ tokens: [Segment]) -> [(word: String, start: Double, tokenEnd: Int)] {
     var out: [(word: String, start: Double, tokenEnd: Int)] = []
     for (i, t) in tokens.enumerated() {

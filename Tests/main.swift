@@ -80,6 +80,8 @@ assert(lockableSentences(ss, previous: ["Hello there.", "How are you?"], audioEn
 assert(lockableSentences(ss, previous: [], audioEnd: 5) == 0)  // the first pass of a window locks nothing
 assert(sentences([(0, 1, " Mr."), (1, 2, " Smith"), (2, 3, " left.")]).map(\.text) == ["Mr. Smith left."] && ss[1].start == 1.0)
 assert(forcedCut([(0, 1, " a"), (1.1, 2, " b"), (3, 4, " c"), (4.1, 5, "d")], from: 0.5, to: 4.5) == 2)  // the widest pause, before a word
+// "<unk>" (Parakeet's « » and dashes in Ukrainian) goes, the word after it keeps its space
+assert(dropUnknown([(0, 1, " по"), (1, 2, " <unk>"), (2, 3, " це"), (3, 4, " <unk>"), (4, 5, "Уні"), (5, 6, "версал"), (6, 7, "<unk>"), (7, 8, ",")]).map(\.text).joined() == " по це Універсал,")
 
 // each "Them" line gets the voice that overlaps it most; "Me" lines and uncovered lines are left alone
 let talk = [Line(t: 0, src: "sys", text: "Hi.", part: 1, final: true, w: 0), Line(t: 2000, src: "mic", text: "Hello.", part: 1, final: true, w: 0),
