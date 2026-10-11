@@ -379,6 +379,9 @@ assert(callAppName(bundle: "us.zoom.xos", path: "/Applications/zoom.us.app/Conte
 func spoke(_ t: Int, _ spk: String) -> Line { var l = line(t, "sys", "Something said here."); l.spk = spk; return l }
 let liveVoices = [spoke(1000, "2-1"), spoke(3000, "2-1"), spoke(5000, "@Oleg"), spoke(21000, "2-2"), spoke(23000, "2-2"), spoke(40000, "2-3")]
 assert(carryVoices(live: liveVoices, turns: [Turn(start: 0, end: 10000, spk: "a"), Turn(start: 20000, end: 30000, spk: "b"), Turn(start: 39000, end: 41000, spk: "c")]) == ["a": "2-1", "b": "2-2"])
+// two people the live voices lumped into one ("2-1"), split after the call: the one with more of its lines keeps it, the other is new
+let lumped = [spoke(1000, "2-1"), spoke(3000, "2-1"), spoke(5000, "2-1"), spoke(21000, "2-1"), spoke(23000, "2-1")]
+assert(carryVoices(live: lumped, turns: [Turn(start: 0, end: 10000, spk: "a"), Turn(start: 20000, end: 30000, spk: "b")]) == ["a": "2-1"])
 assert(oneOnOne(invited: ["Oleg Petrenko"], voices: ["2-1"]) == ["2-1": "Oleg Petrenko"] && oneOnOne(invited: ["A", "B"], voices: ["2-1"]).isEmpty)
 
 print("ok")

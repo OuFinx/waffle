@@ -1255,18 +1255,20 @@ func echoLike(_ mic: [Float], _ ref: [Float], maxLag: Int, step: Int = 32) -> Bo
 // MARK: after a call: the other side's voices told apart again over the whole call
 
 /// Which live voice each voice told apart after the call is: the one most of its live lines had. Live lines the call window named count too
-/// ("@Oleg"). A voice with too few lines, or no clear winner, stays new.
+/// ("@Oleg"). A voice with too few lines, or no clear winner, stays new. A live voice goes to one voice only, the one with the most of its
+/// lines: live voices are often two people lumped together, and those the pass after the call split stay split.
 func carryVoices(live: [Line], turns: [Turn]) -> [String: String] {
     var votes: [String: [String: Int]] = [:]
     for l in live where l.src == "sys" {
         guard let spk = l.spk, let t = turns.first(where: { $0.start <= l.t + 300 && l.t + 300 < $0.end }) else { continue }
         votes[t.spk, default: [:]][spk, default: 0] += 1
     }
-    return votes.compactMapValues { v in
+    let won = votes.compactMapValues { v -> (spk: String, n: Int)? in
         let total = v.values.reduce(0, +)
         guard let top = v.max(by: { $0.value < $1.value || ($0.value == $1.value && $0.key > $1.key) }), top.value >= 2, top.value * 10 >= total * 6 else { return nil }
-        return top.key
+        return (top.key, top.value)
     }
+    return won.filter { o, w in !won.contains { $0.key != o && $0.value.spk == w.spk && ($0.value.n > w.n || ($0.value.n == w.n && $0.key < o)) } }.mapValues(\.spk)
 }
 
 /// A call with one other person on the invite and one voice on the other side: that voice is that person.
