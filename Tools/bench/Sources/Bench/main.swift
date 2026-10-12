@@ -102,12 +102,13 @@ live = refined
 let t2 = Date()
 let segs = try await Engine.shared.diarize(tape.floats, maxSpeakers: nil).turns
 let offTurns = segs.map { Turn(start: Int(tape.clock.ms(Int($0.start * 16000))), end: Int(tape.clock.ms(Int($0.end * 16000))), spk: $0.spk) }
-let use = !offTurns.isEmpty && live.contains { $0.spk == nil }
+let more = Set(offTurns.map(\.spk)).count > Set(live.compactMap(\.spk)).count
+let use = !offTurns.isEmpty && (more || live.contains { $0.spk == nil })
 var polished = live
 if use {
     let carried = carryVoices(live: live, turns: offTurns)
     polished = labelSpeakers(live, offTurns.map { Turn(start: $0.start, end: $0.end, spk: carried[$0.spk] ?? "1-\($0.spk)") })
-    polished = zip(live, polished).map { $0.spk == nil ? $1 : $0 }
+    if !more { polished = zip(live, polished).map { $0.spk == nil ? $1 : $0 } }
 }
 let polishTime = Date().timeIntervalSince(t2)
 

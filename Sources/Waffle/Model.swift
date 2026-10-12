@@ -529,7 +529,12 @@ final class Model: ObservableObject {
             let most = max(people, invited.count) > 0 ? max(people, invited.count) + 1 : nil
             let found = try? await Engine.shared.diarize(tape.floats, maxSpeakers: most)
             let turns = (found?.turns ?? []).map { Turn(start: Int(tape.clock.ms(Int($0.start * 16000))), end: Int(tape.clock.ms(Int($0.end * 16000))), spk: $0.spk) }
-            let use = !turns.isEmpty && live.contains { $0.src == "sys" && $0.spk == nil }
+            // More voices after the call than live: the live model ran out of its 8 voices (a stand-up of 15) and lumped people together,
+            // so the whole call's voices take every line. Never the case on 16 meetings of 3 to 9 people; on stand-ups of 12 and 15 people
+            // it took the right voice after the call from 66% of lines to 91%.
+            let liveVoices = Set(live.compactMap { $0.src == "sys" ? $0.spk : nil }.filter { !$0.hasPrefix("@") })
+            let more = Set(turns.map(\.spk)).count > liveVoices.count
+            let use = !turns.isEmpty && (more || live.contains { $0.src == "sys" && $0.spk == nil })
             var relabeled = live
             let carried = carryVoices(live: live, turns: turns)
             // Known voices: each transcript voice's print (from the longest voice after the call that is it), only for voices that spoke long enough.
@@ -546,7 +551,7 @@ final class Model: ObservableObject {
                 relabeled = labelFromScreen(labelSpeakers(live, turns.map { Turn(start: $0.start, end: $0.end, spk: carried[$0.spk] ?? "\(part)-\($0.spk)") }), talking, names: names)
                 // Only lines the live voices missed (the speaker model still loading, a gap): on 16 real meetings the live voices were
                 // right more often than the whole-call ones (94% of lines against 89%), which moved lines that were right.
-                relabeled = zip(live, relabeled).map { $0.spk == nil ? $1 : $0 }
+                if !more { relabeled = zip(live, relabeled).map { $0.spk == nil ? $1 : $0 } }
             }
             log.info("speakers after the call: \(Set(turns.map(\.spk)).count) voices in \(Date().timeIntervalSince(started), format: .fixed(precision: 1)) s, \(use ? "used" : "kept the live ones")")
             DispatchQueue.main.async { [self] in

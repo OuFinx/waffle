@@ -1,4 +1,24 @@
-import json, re, sys, itertools, collections
+import json, re, sys, collections
+def match(m, labels, spks):
+    """Best one-to-one sum of m[(label, speaker)] (Hungarian method; a label or speaker may stay unmatched)."""
+    n = max(len(labels), len(spks)); INF = float("inf")
+    c = [[-(m[(labels[i], spks[j])] if i < len(labels) and j < len(spks) and labels[i] else 0) for j in range(n)] for i in range(n)]
+    u, v, p, way = [0] * (n + 1), [0] * (n + 1), [0] * (n + 1), [0] * (n + 1)
+    for i in range(1, n + 1):
+        p[0], j0 = i, 0; minv, used = [INF] * (n + 1), [False] * (n + 1)
+        while p[j0]:
+            used[j0] = True; i0, d, j1 = p[j0], INF, 0
+            for j in range(1, n + 1):
+                if not used[j]:
+                    cur = c[i0 - 1][j - 1] - u[i0] - v[j]
+                    if cur < minv[j]: minv[j], way[j] = cur, j0
+                    if minv[j] < d: d, j1 = minv[j], j
+            for j in range(n + 1):
+                if used[j]: u[p[j]] += d; v[j] -= d
+                else: minv[j] -= d
+            j0 = j1
+        while j0: j1 = way[j0]; p[j0] = p[j1]; j0 = j1
+    return -sum(c[p[j] - 1][j - 1] for j in range(1, n + 1) if p[j])
 ref = json.load(open(sys.argv[1])); out = json.load(open(sys.argv[2])); off = float(sys.argv[3])
 FILL = {"uh", "um", "mm", "hmm", "mmm", "huh", "uh-huh", "mm-hmm", "ah", "oh", "eh", "hm"}
 def norm(ws):
@@ -49,16 +69,14 @@ if "windows" in out:
 for key in ("live", "polish"):
     if words:
         m = collections.Counter((L[k][key], spk) for k, spk in words); labels = sorted({L[k][key] for k, _ in words})
-        best = max(sum(m[(lab, s)] for lab, s in zip(perm, spks) if lab) for perm in itertools.permutations(labels + [None] * max(0, len(spks) - len(labels)), len(spks)))
+        best = match(m, labels, spks)
         print(f"[{key}] words with the right voice {best / len(words) * 100:.1f}% of {len(words)} reference words in lines")
 for key in ("live", "polish"):
     pairs = [(l[key], t) for l, t in zip(L, truth) if t]
     labels = sorted({p[0] for p in pairs})
     m = collections.Counter(pairs)
     purity = sum(max(m[(lab, s)] for s in spks) for lab in labels) / len(pairs)
-    best = 0
-    for perm in itertools.permutations(labels + [None] * max(0, len(spks) - len(labels)), len(spks)):
-        best = max(best, sum(m[(lab, s)] for lab, s in zip(perm, spks) if lab))
+    best = match(m, labels, spks)
     print(f"\n[{key}] labels {len(labels)}; purity {purity * 100:.0f}%, one-to-one {best / len(pairs) * 100:.0f}% of lines")
     print("        " + " ".join(f"{s:>5}" for s in spks))
     for lab in labels: print(f"  {lab or '-':>5} " + " ".join(f"{m[(lab, s)]:>5}" for s in spks))
