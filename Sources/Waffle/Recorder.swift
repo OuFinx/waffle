@@ -146,7 +146,7 @@ final class Recorder {
             let t = SystemTap()
             t.onAudio = { [weak self] in self?.sysAudio($0, $1) }
             t.onWrongRate = { [weak self] in
-                log.error("process tap delivers at another rate than its format says: rebuilding it")
+                log.error("process tap changed its format or delivers at another rate: rebuilding it")
                 self?.restartSystem()
             }
             do {
@@ -217,8 +217,30 @@ final class Recorder {
 
     /// Twice a second: finish windows whose audio stopped coming (nothing plays, or the mic is muted), and bring back a capture that
     /// went quiet without saying so.
+    /// The recognizer keeps hearing nothing in the system audio's speech: it may be read wrong (a format that changed unnoticed), so it is
+    /// captured afresh.
+    fileprivate func lostSpeech() {
+        log.error("system audio: speech but no words three passes running, capturing it afresh")
+        restartSystem(after: 0)
+    }
+
+    private var ticks = 0
+
     private func tick() {
         guard !isStopped else { return }
+        ticks += 1
+        if ticks % 60 == 0 {  // every 30 s, kept by the system log (notice), so a call that went wrong can be looked into afterwards
+            let out: AudioObjectID = prop(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, AudioObjectID(kAudioObjectUnknown))
+            let inp: AudioObjectID = prop(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultInputDevice, AudioObjectID(kAudioObjectUnknown))
+            let rates = "output \(prop(out, kAudioDevicePropertyNominalSampleRate, Float64(0))) Hz, input \(prop(inp, kAudioDevicePropertyNominalSampleRate, Float64(0))) Hz"
+            sysQueue.async { [self] in  // never waits on the system audio's queue (see shutdown)
+                let t = tap?.report() ?? (screen != nil ? "screen capture" : "no capture")
+                Task { [sys, mic] in
+                    let a = await sys!.report(), b = await mic!.report()
+                    log.notice("health: \(rates, privacy: .public); system \(t, privacy: .public); them: \(a, privacy: .public); me: \(b, privacy: .public)")
+                }
+            }
+        }
         let now = Date().timeIntervalSince1970 * 1000
         let (m, s) = flags.withLock { ($0.lastMic, $0.lastSys) }
         // No audio captured for 0.7 s (screen capture sends none while nothing plays; a muted mic sends none): finish the window.
@@ -456,10 +478,25 @@ actor Source {
         rec.error("Speech recognition: \(e.localizedDescription)")
     }
 
+    // What the passes gave since the last report, and how many passes in a row heard nothing in a second or more of speech.
+    private var stats = (passes: 0, empty: 0, words: 0), deafRun = 0
+
     private func finished(_ p: Pass, _ tokens: [Segment]?) {
+        let heard = (tokens ?? []).filter { $0.text.hasPrefix(" ") }.count
+        stats.passes += 1; stats.words += heard
+        if heard == 0 && p.voiced >= 16000 { stats.empty += 1; deafRun += 1 } else if heard > 0 { deafRun = 0 }
+        // Speech, yet the recognizer heard nothing three passes running (seen on a call where the system audio turned into noise to it
+        // after 4 minutes): capture the system audio afresh.
+        if name == "sys", deafRun >= 3 { deafRun = 0; rec.lostSpeech() }
         let out = windower.done(p, tokens)
         for e in out { rec.window(name, Int(clock.ms(e.start)), e.final, e.segments) }
         if hearing && !out.isEmpty { hearing = false; rec.hearing(name, false) }
+    }
+
+    /// The passes since the last call, for the log.
+    func report() -> String {
+        defer { stats = (0, 0, 0) }
+        return "\(stats.passes) passes, \(stats.empty) heard nothing in speech, \(stats.words) words"
     }
 
     /// No audio was captured for a while: what came is the end of it (the last bit padded to a chunk), the window is done. Not while a
@@ -744,8 +781,9 @@ enum SystemAudioPermission {
 
 /// Everything the Mac plays except Waffle's own sound, through a Core Audio process tap (macOS 14.2+) in a private aggregate device. It
 /// needs only System Audio Recording (no screen recording, no purple indicator, no monthly question) and carries the audio's own
-/// timestamps. Bound to the output devices there are when it starts: the Recorder rebuilds it when the output changes, and when the
-/// rate it delivers is not the one its format said (onWrongRate: the device changed its rate in place, see RateCheck).
+/// timestamps. Bound to the output devices there are when it starts: the Recorder rebuilds it when the output changes, and when its
+/// format changes or the rate it delivers is not the one its format said (onWrongRate). AirPods do that in place when a call app takes
+/// their microphone: 48 kHz to 24 kHz, and audio read at the old rate comes out as made-up words in other languages.
 final class SystemTap {
     var onAudio: (AVAudioPCMBuffer, UInt64?) -> Void = { _, _ in }
     var onWrongRate: () -> Void = {}
@@ -755,6 +793,8 @@ final class SystemTap {
     private let q = DispatchQueue(label: "tap", qos: .userInitiated)
     private let last = Locked(Date())
     private var rate = RateCheck(rate: 0)  // only on q
+    private var formatRate = 0.0, seen = (frames: 0, squares: 0.0, since: Date())  // only on q, for report()
+    private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
 
     var silentFor: TimeInterval { Date().timeIntervalSince(last.withLock { $0 }) }
 
@@ -790,6 +830,16 @@ final class SystemTap {
         err = AudioObjectGetPropertyData(tapID, &addr, 0, nil, &size, &asbd)
         guard err == noErr, asbd.mSampleRate > 0, let format = AVAudioFormat(streamDescription: &asbd) else { throw fail("The system audio has no format", err) }
         rate = RateCheck(rate: asbd.mSampleRate)
+        formatRate = asbd.mSampleRate
+        // The tap's format, and the output device's own rate (which of the two Core Audio reports when AirPods switch is not certain).
+        let out: AudioObjectID = prop(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, AudioObjectID(kAudioObjectUnknown))
+        let outRate: Float64 = prop(out, kAudioDevicePropertyNominalSampleRate, 0)
+        watch(tapID, kAudioTapPropertyFormat) { [tapID] in
+            var now = AudioStreamBasicDescription(), n = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            var a = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyFormat, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            return AudioObjectGetPropertyData(tapID, &a, 0, nil, &n, &now) == noErr && now.mSampleRate > 0 && now.mSampleRate != asbd.mSampleRate
+        }
+        if out != kAudioObjectUnknown { watch(out, kAudioDevicePropertyNominalSampleRate) { prop(out, kAudioDevicePropertyNominalSampleRate, Float64(0)) != outRate } }
 
         err = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, q) { [weak self] _, input, inputTime, _, _ in
             self?.deliver(input, inputTime.pointee, format)
@@ -798,6 +848,26 @@ final class SystemTap {
         last.withLock { $0 = Date() }
         err = AudioDeviceStart(aggregateID, procID)
         guard err == noErr else { throw fail("Could not start the system audio", err) }
+    }
+
+    /// The format's rate, the rate frames came at and their loudness since the last call.
+    func report() -> String {
+        q.sync {
+            defer { seen = (0, 0, Date()) }
+            let secs = max(0.001, Date().timeIntervalSince(seen.since))
+            return String(format: "tap %.0f Hz, %.0f frames/s, rms %.4f", formatRate, Double(seen.frames) / secs, (seen.squares / Double(max(1, seen.frames))).squareRoot())
+        }
+    }
+
+    /// Calls onWrongRate when `selector` of `object` changes and `changed` says it matters.
+    private func watch(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ changed: @escaping () -> Bool) {
+        var a = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        let l: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard changed() else { return }
+            log.error("system audio rate changed in place")
+            self?.onWrongRate()
+        }
+        if AudioObjectAddPropertyListenerBlock(object, &a, q, l) == noErr { listeners.append((object, a, l)) }
     }
 
     private func deliver(_ input: UnsafePointer<AudioBufferList>, _ time: AudioTimeStamp, _ format: AVAudioFormat) {
@@ -816,12 +886,15 @@ final class SystemTap {
             dst[i].mDataByteSize = UInt32(n)
         }
         last.withLock { $0 = Date() }
+        if let d = buf.floatChannelData { seen.frames += Int(frames); for i in 0..<Int(frames) { seen.squares += Double(d[0][i] * d[0][i]) } }
         let host = time.mFlags.contains(.hostTimeValid) ? time.mHostTime : nil
         if let host, rate.add(Int(frames), at: Double(AudioConvertHostTimeToNanos(host)) / 1e9) { onWrongRate() }
         onAudio(buf, host)
     }
 
     func stop() {
+        for (o, a, l) in listeners { var a = a; _ = AudioObjectRemovePropertyListenerBlock(o, &a, q, l) }
+        listeners = []
         if aggregateID != kAudioObjectUnknown {
             if let p = procID { _ = AudioDeviceStop(aggregateID, p); _ = AudioDeviceDestroyIOProcID(aggregateID, p) }
             _ = AudioHardwareDestroyAggregateDevice(aggregateID)
