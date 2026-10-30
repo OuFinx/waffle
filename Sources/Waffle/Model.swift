@@ -356,7 +356,7 @@ final class Model: ObservableObject {
     /// Who said each "Them" line: the diarized voice, else the person the call window showed talking then. A line that shows a
     /// person's name keeps it (see keepNamed).
     private func labelled(_ lines: [Line]) -> [Line] {
-        let lines = splitAtVoices(lines, turns)
+        let lines = splitAtVoices(splitAtInterjections(lines), turns)
         let (out, names) = keepNamed(lines, labelFromScreen(labelSpeakers(lines, turns), talking, names: live.names), live.names)
         if names != live.names, let id = activeId {
             for (spk, name) in names where live.names[spk] == nil { settled[spk] = name }

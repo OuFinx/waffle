@@ -100,6 +100,10 @@ let parts = labelSpeakers(splitAtVoices(said, handover), handover)
 assert(parts.map(\.text) == ["So we ship it on Monday then", "yes and I will write the notes."] && parts.map(\.spk) == ["1-1", "1-2"] && parts[1].t == said[0].words![7], "\(parts)")
 assert(splitAtVoices(said, [Turn(start: 10000, end: 15000, spk: "1-1"), Turn(start: 13000, end: 13600, spk: "1-2")]) == said)  // a short other voice
 assert(try! JSONDecoder().decode(Line.self, from: JSONEncoder().encode(said[0])).words == nil)  // word times are not saved
+// the other side talking on after the user's "Yeah." goes below it, not on their line from before it; done twice it changes nothing
+let cut = splitAtInterjections((said + [line(12600, "mic", "Yeah.")]).sorted { $0.t < $1.t })
+assert(cut.map(\.text) == ["So we ship it on Monday then", "Yeah.", "yes and I will write the notes."] && cut[2].t == said[0].words![7] && splitAtInterjections(cut) == cut, "\(cut)")
+assert(splitAtInterjections(said + [line(20000, "mic", "Yeah.")]).count == 2)  // after the line ends: nothing to split
 let names = speakerNames(labelled, names: ["1-2": "Oleg"])
 assert(names == ["1-1": "Speaker 1", "1-2": "Oleg"] && labelled.map { label($0, names) } == ["Speaker 1", "Me", "Oleg", "Them"])
 assert(speakerNames(Array(labelled.prefix(2)), names: [:]) == ["1-1": "Them"])  // one voice only: plain "Them"
@@ -372,6 +376,7 @@ let theirs = talk((0..<40).map { $0 % 5 < 3 ? 1 : 0 }), own = talk((0..<40).map 
 func loudness(_ x: [Float], from ms: Double) -> Loudness { var l = Loudness(); for k in stride(from: 0, to: x.count - 4095, by: 4096) { l.add(Array(x[k..<k + 4096]), ms: ms + Double(k) / 16) }; return l }
 let them = loudness(theirs, from: 1000)
 assert(followsLoudness(mic: loudness([Float](repeating: 0, count: 1600) + theirs.map { $0 * 0.1 }, from: 1000), sys: them, from: 1500, to: 3500))  // 100 ms later
+assert(followsLoudness(mic: loudness([Float](repeating: 0, count: 6400) + theirs.map { $0 * 0.1 }, from: 1000), sys: them, from: 1500, to: 3500))  // 400 ms later (Bluetooth)
 assert(!followsLoudness(mic: loudness(own, from: 1000), sys: them, from: 1500, to: 3500))
 assert(!followsLoudness(mic: loudness(own, from: 1000), sys: loudness([Float](repeating: 0, count: theirs.count), from: 1000), from: 1500, to: 3500))  // they were silent
 let repeated = [line(0, "sys", "We ship the release on Monday at nine and then the freeze starts."), line(2000, "mic", "Monday at nine and then the freeze.")]

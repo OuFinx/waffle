@@ -316,7 +316,9 @@ final class Recorder {
     func reference(endMs: Double, count: Int) async -> [Float]? { await sys.recent(endMs: endMs, count: count) }
 
     /// Whether a stretch of the mic (epoch ms) sounds like the speakers coming back, so a "Me" line that reads like a "Them" line may go.
-    func echoed(_ from: Int, _ to: Int) -> Bool { speakersInUse && loudness.withLock { followsLoudness(mic: $0.mic, sys: $0.sys, from: from, to: to) } }
+    /// Not only on speakers: with AirPods Max as the output the call still came back into the mic, and every sentence of the other side
+    /// showed as the user's too. Through headphones that keep the sound in, the mic does not follow the system audio and nothing goes.
+    func echoed(_ from: Int, _ to: Int) -> Bool { loudness.withLock { followsLoudness(mic: $0.mic, sys: $0.sys, from: from, to: to) } }
     fileprivate func loud(_ src: String, _ x: [Float], _ ms: Double) { loudness.withLock { src == "mic" ? $0.mic.add(x, ms: ms) : $0.sys.add(x, ms: ms) } }
 
     fileprivate func window(_ src: String, _ w: Int, _ final: Bool, _ segs: [Segment]) { DispatchQueue.main.async { self.onWindow(src, w, final, segs) } }

@@ -77,6 +77,30 @@ func splitAtVoices(_ lines: [Line], _ turns: [Turn], minWords: Int = 5, minMs: I
     }
 }
 
+/// A line the other side starts a line inside of is split there, so the transcript reads in the order things were said: when the other side
+/// talked on after the user's "Yeah.", the rest went on their line from before it, above the "Yeah.", and the user's words looked out of
+/// place. Lines without word times stay whole. Lines in time order, returned in time order.
+func splitAtInterjections(_ lines: [Line]) -> [Line] {
+    let starts = ["mic": lines.filter { $0.src == "mic" }.map(\.t), "sys": lines.filter { $0.src == "sys" }.map(\.t)]
+    return lines.flatMap { l -> [Line] in
+        let text = l.text.split(whereSeparator: \.isWhitespace)
+        guard let ws = l.words, ws.count == text.count, ws.count >= 2, let other = starts[l.src == "mic" ? "sys" : "mic"] else { return [l] }
+        var j = firstIndex(other.count) { other[$0] > ws[0] }, cuts: [Int] = []
+        while j < other.count, other[j] <= ws[ws.count - 1] {
+            let i = firstIndex(ws.count) { ws[$0] >= other[j] }  // the first word said after the other side's line started
+            if cuts.last != i { cuts.append(i) }
+            j += 1
+        }
+        guard !cuts.isEmpty else { return [l] }
+        let bounds = [0] + cuts + [ws.count]
+        return zip(bounds, bounds.dropFirst()).map { a, b in
+            var p = l
+            p.t = ws[a]; p.text = text[a..<b].joined(separator: " "); p.words = Array(ws[a..<b])
+            return p
+        }
+    }.sorted { $0.t < $1.t }
+}
+
 /// The first index in 0..<count where `ok` holds, for an `ok` that is false and then true; count if it never holds.
 func firstIndex(_ count: Int, where ok: (Int) -> Bool) -> Int {
     var lo = 0, hi = count
@@ -1447,7 +1471,7 @@ struct Loudness {
     }
 }
 
-/// Whether the mic's loudness over a stretch (epoch ms) rises and falls with the system audio's 0-300 ms before: the speakers coming back. The user's own voice does not follow it, also when it repeats the other side's words, so a "Me" line that reads like a "Them" line is only dropped as echo when this agrees (see dropEcho). On the echo bench (Tools/bench) that kept every repeat the text alone deleted (23 of 84 repeat lines) and lost 44% fewer of the user's words, for 11% more echo words left in "Me" (at 0.3 it lost more of the user's words, at 0.5 it left more echo).
+/// Whether the mic's loudness over a stretch (epoch ms) rises and falls with the system audio's 0-500 ms before: the speakers coming back. The user's own voice does not follow it, also when it repeats the other side's words, so a "Me" line that reads like a "Them" line is only dropped as echo when this agrees (see dropEcho). On the echo bench (Tools/bench) that kept every repeat the text alone deleted (23 of 84 repeat lines) and lost 44% fewer of the user's words, for 11% more echo words left in "Me" (at 0.3 it lost more of the user's words, at 0.5 it left more echo).
 func followsLoudness(mic: Loudness, sys: Loudness, from: Int, to: Int) -> Bool {
     let a = max(0, Int((Double(from) - mic.start) / 8)), b = min(mic.frames.count, Int((Double(to) - mic.start) / 8))
     guard b - a >= 12 else { return false }
@@ -1458,7 +1482,8 @@ func followsLoudness(mic: Loudness, sys: Loudness, from: Int, to: Int) -> Bool {
         for (x, y) in zip(m, s) { sab += (x - mm) * (y - ms); saa += (x - mm) * (x - mm); sbb += (y - ms) * (y - ms) }
         return saa > 0 && sbb > 0 ? sab / (saa * sbb).squareRoot() : 0
     }
-    return (0...38).contains { lag in
+    // Up to 500 ms: through Bluetooth the sound comes back later than through the Mac's speakers (the real echo lines started 180-320 ms after the other side's).
+    return (0...62).contains { lag in
         let lo = a + shift - lag, hi = b + shift - lag
         return lo >= 0 && hi <= sys.frames.count && corr(sys.frames[lo..<hi]) >= 0.4
     }
