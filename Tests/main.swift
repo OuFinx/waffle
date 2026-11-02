@@ -101,8 +101,17 @@ assert(parts.map(\.text) == ["So we ship it on Monday then", "yes and I will wri
 assert(splitAtVoices(said, [Turn(start: 10000, end: 15000, spk: "1-1"), Turn(start: 13000, end: 13600, spk: "1-2")]) == said)  // a short other voice
 assert(try! JSONDecoder().decode(Line.self, from: JSONEncoder().encode(said[0])).words == nil)  // word times are not saved
 // the other side talking on after the user's "Yeah." goes below it, not on their line from before it; done twice it changes nothing
-let cut = splitAtInterjections((said + [line(12600, "mic", "Yeah.")]).sorted { $0.t < $1.t })
-assert(cut.map(\.text) == ["So we ship it on Monday then", "Yeah.", "yes and I will write the notes."] && cut[2].t == said[0].words![7] && splitAtInterjections(cut) == cut, "\(cut)")
+let paused = replaceWindow([], src: "sys", w: 10000, part: 1, final: true, segments: [(0, 2.0, " So we ship it on Monday then"), (4.0, 6.0, " yes and I will write the notes.")])
+let cut = splitAtInterjections((paused + [line(13000, "mic", "Yeah.")]).sorted { $0.t < $1.t })
+assert(cut.map(\.text) == ["So we ship it on Monday then", "Yeah.", "yes and I will write the notes."] && splitAtInterjections(cut) == cut, "\(cut)")
+// talk over talk stays whole: the mic's copy of a call a moment later does not cut either line into words
+func spoken(_ w: Int, _ src: String, _ text: String) -> Line { var l = line(w, src, text); l.words = text.split(separator: " ").indices.map { w + $0 * 300 }; return l }
+let overlapped = [spoken(10000, "sys", "they are all under the weekly board"), spoken(10150, "mic", "they are all under the weekly board")]
+assert(splitAtInterjections(overlapped) == overlapped)
+// a "Them" line cut in two is still what the mic's one line repeats
+var firstPiece = line(10000, "sys", "we ship the release on Monday"), secondPiece = line(13000, "sys", "at nine and then the freeze starts")
+firstPiece.w = 10000; secondPiece.w = 10000
+assert(dropEcho([firstPiece, line(10300, "mic", "we ship the release on Monday at nine and then the freeze starts"), secondPiece]).count == 2)
 assert(splitAtInterjections(said + [line(20000, "mic", "Yeah.")]).count == 2)  // after the line ends: nothing to split
 let names = speakerNames(labelled, names: ["1-2": "Oleg"])
 assert(names == ["1-1": "Speaker 1", "1-2": "Oleg"] && labelled.map { label($0, names) } == ["Speaker 1", "Me", "Oleg", "Them"])

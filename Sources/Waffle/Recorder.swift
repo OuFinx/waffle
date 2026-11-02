@@ -309,9 +309,6 @@ final class Recorder {
         observers = []
     }
 
-    /// The echo check needs to know whether the sound goes to speakers.
-    var speakersInUse: Bool { !micCapture.headphones }
-
     /// The system audio around a wall time, for the echo check (nil if not there yet).
     func reference(endMs: Double, count: Int) async -> [Float]? { await sys.recent(endMs: endMs, count: count) }
 
@@ -427,8 +424,8 @@ actor Source {
         let ms = clock.ms(fed)
         var x = input
         rec.loud(name, input, ms)
-        if name == "mic", rec.speakersInUse, let ref = await rec.reference(endMs: ms + 256, count: chunk + 4800), echoLike(x, ref, maxLag: 4800) {
-            x = quiet(chunk)  // the speakers coming back into the mic, past echo cancellation
+        if name == "mic", let ref = await rec.reference(endMs: ms + 256, count: chunk + 8000), echoLike(x, ref, maxLag: 8000) {  // also in headphones (AirPods Max let the call into their mic, up to 500 ms late)
+            x = quiet(chunk)  // the call coming back into the mic, past echo cancellation
         }
         let (heard, rms) = voiceLevel.adjust(x)  // quiet speakers heard as well as loud ones
         let p: Float
@@ -609,7 +606,6 @@ final class MicCapture {
     private let state = Locked(State())
     private struct State { var gen = 0; var stopped = false; var busySince: Date? }
     private let last = Locked(Date()), lastSound = Locked(Date())
-    private let phones = Locked(false)
 
     /// Seconds since the last audio, and since the last audio that was not mostly exact zeros.
     var silentFor: TimeInterval { Date().timeIntervalSince(last.withLock { $0 }) }
@@ -619,8 +615,6 @@ final class MicCapture {
     /// Started and not given up (no microphone found): the watchdog may restart it.
     var running: Bool { live.withLock { $0 } }
     private let live = Locked(false)
-    /// The sound goes to headphones (see headphonesInUse).
-    var headphones: Bool { phones.withLock { $0 } }
 
     func start() { live.withLock { $0 = true }; restart(after: 0) }
 
@@ -671,7 +665,6 @@ final class MicCapture {
         let input = e.inputNode  // where it hangs, if it does
         guard current(g) else { return }  // it came back after a newer request or a stop: its result is void
         let hp = headphonesInUse()
-        phones.withLock { $0 = hp }
         let vp = !noVoiceProcessing && !hp
         if vp {
             do { try input.setVoiceProcessingEnabled(true) } catch { log.error("voice processing: \(error.localizedDescription, privacy: .public)") }

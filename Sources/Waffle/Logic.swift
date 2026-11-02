@@ -77,10 +77,8 @@ func splitAtVoices(_ lines: [Line], _ turns: [Turn], minWords: Int = 5, minMs: I
     }
 }
 
-/// A line the other side starts a line inside of is split there, so the transcript reads in the order things were said: when the other side
-/// talked on after the user's "Yeah.", the rest went on their line from before it, above the "Yeah.", and the user's words looked out of
-/// place. Lines without word times stay whole. Lines in time order, returned in time order.
-func splitAtInterjections(_ lines: [Line]) -> [Line] {
+/// A line is split where the other side's line starts in a pause of it (at least `pauseMs` from one word's start to the next), so the transcript reads in the order things were said: when the other side talked on after the user's "Yeah.", the rest went on their line from before it, above the "Yeah.", and the user's words looked out of place. Only in a pause: splitting at every start cut talk over talk, and a call heard on the mic, into one word per line (638 of 798 lines on a real meeting). Lines without word times stay whole. Lines in time order, returned in time order.
+func splitAtInterjections(_ lines: [Line], pauseMs: Int = 700) -> [Line] {
     let starts = ["mic": lines.filter { $0.src == "mic" }.map(\.t), "sys": lines.filter { $0.src == "sys" }.map(\.t)]
     return lines.flatMap { l -> [Line] in
         let text = l.text.split(whereSeparator: \.isWhitespace)
@@ -88,7 +86,7 @@ func splitAtInterjections(_ lines: [Line]) -> [Line] {
         var j = firstIndex(other.count) { other[$0] > ws[0] }, cuts: [Int] = []
         while j < other.count, other[j] <= ws[ws.count - 1] {
             let i = firstIndex(ws.count) { ws[$0] >= other[j] }  // the first word said after the other side's line started
-            if cuts.last != i { cuts.append(i) }
+            if ws[i] - ws[i - 1] >= pauseMs, cuts.last != i { cuts.append(i) }
             j += 1
         }
         guard !cuts.isEmpty else { return [l] }
@@ -280,7 +278,13 @@ func isEcho(_ mine: [String], at t: Int, them: [String], at s: Int) -> Bool {
 
 /// On speakers the mic also hears the other side: drop "Me" lines that are an echo of a "Them" line (see isEcho) when the audio of the line (`heard`, from its start to about 0.4 s a word later, epoch ms) also sounds like echo. Text alone deleted the user's own sentence when they repeated what the other side said.
 func dropEcho(_ lines: [Line], heard: (Int, Int) -> Bool = { _, _ in true }) -> [Line] {
-    let them = lines.filter { $0.src == "sys" }.map { ($0.t, words($0.text)) }
+    let sys = lines.filter { $0.src == "sys" }
+    var them = sys.map { ($0.t, words($0.text)) }
+    // A window's lines also as one: splitAtInterjections may have cut in two what the mic heard as one line.
+    for (_, group) in Dictionary(grouping: sys, by: { $0.w ?? $0.t }) where group.count > 1 {
+        let g = group.sorted { $0.t < $1.t }
+        them.append((g[0].t, g.flatMap { words($0.text) }))
+    }
     return lines.filter { l in
         guard l.src == "mic" else { return true }
         let mine = words(l.text)
